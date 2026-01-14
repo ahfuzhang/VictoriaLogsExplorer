@@ -78,6 +78,27 @@ docker-run-test:
 		-v ./test/datasources/:/etc/grafana/provisioning/datasources/ \
 		grafana/grafana:12.1
 
+docker-run-test-with-download:
+	mkdir -p ./test/data/ && \
+	mkdir -p ./test/config/ && \
+	mkdir -p ./test/datasources/ && \
+	mkdir -p ./test/plugins/ && \
+	rm -rf ./test/plugins/* && \
+	cd ./test/plugins/ && \
+	wget "https://github.com/ahfuzhang/VictoriaLogsExplorer/releases/download/v0.1.0/victoriametrics-victorialogs-explorer-v0.1.0.tar.gz" && \
+	mkdir -p victoriametrics-victorialogs-explorer/ && \
+	tar -xzf victoriametrics-victorialogs-explorer-v0.1.0.tar.gz -C ./victoriametrics-victorialogs-explorer/
+	docker run -it --rm \
+		--name grafana_with_download \
+		-p 3002:3000 \
+		-e GF_PUBLIC_DASHBOARDS_ENABLED=false \
+		-e GF_PLUGINS_PREINSTALL=victoriametrics-logs-datasource \
+		-v ./test/data/:/var/lib/grafana \
+		-v ./test/config/:/etc/grafana \
+		-v ./test/plugins/victoriametrics-victorialogs-explorer/:/var/lib/grafana/plugins/victoriametrics-victorialogs-explorer/ \
+		-v ./test/datasources/:/etc/grafana/provisioning/datasources/ \
+		grafana/grafana:12.1
+
 # make dist PKG_TAG=v0.1.0
 dist:
 	mkdir -p ./dist/$(DIR) && \

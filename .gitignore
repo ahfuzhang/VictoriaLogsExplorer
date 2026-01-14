@@ -2,4 +2,5 @@
 /test/config/provisioning/
 /test/data/
 /test/datasources/
+/test/plugins/
 /dist/
