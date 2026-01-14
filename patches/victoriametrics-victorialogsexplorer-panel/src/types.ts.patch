@@ -1,0 +1,13 @@
+diff --git a/src/types.ts b/src/types.ts
+deleted file mode 100644
+index 47b3fbd..0000000
+--- a/src/types.ts
++++ /dev/null
+@@ -1,7 +0,0 @@
+-type SeriesSize = 'sm' | 'md' | 'lg';
+-
+-export interface SimpleOptions {
+-  text: string;
+-  showSeriesCount: boolean;
+-  seriesCountSize: SeriesSize;
+-}

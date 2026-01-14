@@ -1,0 +1,156 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": 35,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "victoriametrics-logs-datasource",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 30,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "hitsGroupFieldList": "status_code",
+        "jsonConfig": "{\n    \"fixed_field_filter\": [\n        {\n            \"field\":\"enduser_ipv4\",\n            \"text\":\"enduser_ipv4 = \",\n            \"operator\": \"equal\"\n        },\n        {\n            \"field\":\"enduser_ipv6\",\n            \"text\":\"enduser_ipv6 = \",\n            \"operator\": \"equal\"\n        },\n        {\n            \"field\":\"trace_id\",\n            \"text\":\"trace_id = \",\n            \"operator\": \"equal\"\n        }\n    ],\n    \"extra_stream_filter\":[\n        {\n            \"name\": \"trace_id_last_char\",\n            \"if_exists\":{\n                \"field\":\"trace_id\",\n                \"operator\":\"equal\"\n            },\n            \"operator\":\"equal\",\n            \"value\":{\n              \"regexp\":\".*(?<lastchar>[A-Za-z0-9])$\",\n              \"group_name\":\"lastchar\"\n            }\n        },\n        {\n            \"name\": \"enduser_ip_last_byte\",\n            \"if_exists\":{\n                \"field\":\"enduser_ipv4\",\n                \"operator\":\"equal\"\n            },\n            \"operator\":\"equal\",\n            \"value\":{\n              \"regexp\":\".*\\\\.(?<last_byte>[0-9]{1,3})$\",\n              \"group_name\":\"last_byte\"\n            }\n        },\n        {\n            \"name\": \"enduser_ip_last_byte\",\n            \"if_exists\":{\n                \"field\":\"enduser_ipv6\",\n                \"operator\":\"equal\"\n            },\n            \"operator\":\"equal\",\n            \"value\":{\n              \"regexp\":\".*:(?<last_byte>[A-Za-z0-9]+)$\",\n              \"group_name\":\"last_byte\"\n            }\n        }\n    ]\n}\n\n",
+        "logsqlVariable": "$logsql",
+        "showLogsqlTextarea": true,
+        "streamFieldList": "captured_header_host,status_code"
+      },
+      "targets": [
+        {
+          "refId": "A"
+        }
+      ],
+      "title": "Log Explorer",
+      "type": "victoriametrics-victorialogs-explorer"
+    }
+  ],
+  "preload": false,
+  "schemaVersion": 41,
+  "tags": [],
+  "templating": {
+    "list": [
+      {
+        "allowCustomValue": false,
+        "name": "datasource",
+        "options": [],
+        "query": "victoriametrics-logs-datasource",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "allowCustomValue": false,
+        "current": {
+          "text": "1m",
+          "value": "1m"
+        },
+        "description": "",
+        "hide": 2,
+        "name": "step",
+        "options": [
+          {
+            "selected": false,
+            "text": "1s",
+            "value": "1s"
+          },
+          {
+            "selected": false,
+            "text": "5s",
+            "value": "5s"
+          },
+          {
+            "selected": false,
+            "text": "10s",
+            "value": "10s"
+          },
+          {
+            "selected": false,
+            "text": "30s",
+            "value": "30s"
+          },
+          {
+            "selected": true,
+            "text": "1m",
+            "value": "1m"
+          },
+          {
+            "selected": false,
+            "text": "2m",
+            "value": "2m"
+          },
+          {
+            "selected": false,
+            "text": "5m",
+            "value": "5m"
+          },
+          {
+            "selected": false,
+            "text": "10m",
+            "value": "10m"
+          },
+          {
+            "selected": false,
+            "text": "20m",
+            "value": "20m"
+          },
+          {
+            "selected": false,
+            "text": "30m",
+            "value": "30m"
+          },
+          {
+            "selected": false,
+            "text": "1h",
+            "value": "1h"
+          }
+        ],
+        "query": "1s,5s,10s,30s,1m,2m,5m,10m,20m,30m,1h",
+        "type": "custom"
+      },
+      {
+        "description": "",
+        "hide": 2,
+        "name": "logsql",
+        "type": "textbox"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "HAProxy logs",
+  "uid": "831cf487-3134-4aaa-8e86-46fa31b95013",
+  "version": 4
+}

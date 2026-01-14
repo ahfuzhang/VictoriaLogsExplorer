@@ -1,0 +1,17 @@
+diff --git a/panels/logs/shims/LogLineContext.tsx b/panels/logs/shims/LogLineContext.tsx
+new file mode 100644
+index 0000000..6ea7a3b
+--- /dev/null
++++ b/panels/logs/shims/LogLineContext.tsx
+@@ -0,0 +1,11 @@
++import React from 'react';
++
++export const LogLineContext: React.FC<{
++  open?: boolean;
++  onClose?: () => void;
++}> = ({ open, onClose }) => {
++  if (!open) {
++    return null;
++  }
++  return <div onClick={onClose}>Log line context not available in this build.</div>;
++};

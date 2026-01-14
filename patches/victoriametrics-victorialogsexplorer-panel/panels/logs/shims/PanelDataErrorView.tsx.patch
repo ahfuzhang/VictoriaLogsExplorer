@@ -1,0 +1,14 @@
+diff --git a/panels/logs/shims/PanelDataErrorView.tsx b/panels/logs/shims/PanelDataErrorView.tsx
+new file mode 100644
+index 0000000..a3cd52b
+--- /dev/null
++++ b/panels/logs/shims/PanelDataErrorView.tsx
+@@ -0,0 +1,8 @@
++import React from 'react';
++
++export const PanelDataErrorView: React.FC<{ data?: any }> = ({ data }) => {
++  if (!data) {
++    return <div>No data</div>;
++  }
++  return null;
++};

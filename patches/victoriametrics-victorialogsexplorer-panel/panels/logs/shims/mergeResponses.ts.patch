@@ -1,0 +1,11 @@
+diff --git a/panels/logs/shims/mergeResponses.ts b/panels/logs/shims/mergeResponses.ts
+new file mode 100644
+index 0000000..8bbd2b4
+--- /dev/null
++++ b/panels/logs/shims/mergeResponses.ts
+@@ -0,0 +1,5 @@
++export function combineResponses(base: { data: any[] }, next: { data: any[] }) {
++  return {
++    data: [...(base?.data ?? []), ...(next?.data ?? [])],
++  };
++}

@@ -1,0 +1,11 @@
+diff --git a/package.json b/package.json
+index 0abb5b8..a50f52e 100644
+--- a/package.json
++++ b/package.json
+@@ -75,5 +75,5 @@
+     "react": "^18.3.0",
+     "react-dom": "^18.3.0"
+   },
+-  "packageManager": "npm@11.6.2"
++  "packageManager": "yarn@1.22.22"
+ }

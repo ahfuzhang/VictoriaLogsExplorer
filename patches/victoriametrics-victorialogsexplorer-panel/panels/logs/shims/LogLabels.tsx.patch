@@ -1,0 +1,25 @@
+diff --git a/panels/logs/shims/LogLabels.tsx b/panels/logs/shims/LogLabels.tsx
+new file mode 100644
+index 0000000..f3571ae
+--- /dev/null
++++ b/panels/logs/shims/LogLabels.tsx
+@@ -0,0 +1,19 @@
++import React from 'react';
++
++export const LogLabels: React.FC<{ labels?: Record<string, string>; emptyMessage?: string }> = ({
++  labels,
++  emptyMessage,
++}) => {
++  if (!labels || Object.keys(labels).length === 0) {
++    return <span>{emptyMessage ?? ''}</span>;
++  }
++  return (
++    <span>
++      {Object.entries(labels).map(([k, v]) => (
++        <span key={k}>
++          {k}={v}{' '}
++        </span>
++      ))}
++    </span>
++  );
++};

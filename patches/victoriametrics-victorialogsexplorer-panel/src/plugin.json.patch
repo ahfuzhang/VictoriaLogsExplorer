@@ -1,0 +1,13 @@
+diff --git a/src/plugin.json b/src/plugin.json
+index 38de5d0..ea29ce5 100644
+--- a/src/plugin.json
++++ b/src/plugin.json
+@@ -2,7 +2,7 @@
+   "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+   "type": "panel",
+   "name": "VictoriaLogsExplorer",
+-  "id": "victoriametrics-victorialogsexplorer-panel",
++  "id": "victoriametrics-victorialogs-explorer",
+   "info": {
+     "keywords": ["panel"],
+     "description": "",

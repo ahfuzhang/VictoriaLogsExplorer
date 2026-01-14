@@ -1,0 +1,15 @@
+diff --git a/panels/logs/shims/InfiniteScroll.tsx b/panels/logs/shims/InfiniteScroll.tsx
+new file mode 100644
+index 0000000..bf16e8c
+--- /dev/null
++++ b/panels/logs/shims/InfiniteScroll.tsx
+@@ -0,0 +1,9 @@
++import React from 'react';
++
++type Props = {
++  children?: React.ReactNode;
++};
++
++export const InfiniteScroll: React.FC<Props> = ({ children }) => {
++  return <>{children}</>;
++};

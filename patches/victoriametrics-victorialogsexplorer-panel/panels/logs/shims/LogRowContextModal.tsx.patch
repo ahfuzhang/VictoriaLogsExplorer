@@ -1,0 +1,17 @@
+diff --git a/panels/logs/shims/LogRowContextModal.tsx b/panels/logs/shims/LogRowContextModal.tsx
+new file mode 100644
+index 0000000..1632e12
+--- /dev/null
++++ b/panels/logs/shims/LogRowContextModal.tsx
+@@ -0,0 +1,11 @@
++import React from 'react';
++
++export const LogRowContextModal: React.FC<{
++  open?: boolean;
++  onClose?: () => void;
++}> = ({ open, onClose }) => {
++  if (!open) {
++    return null;
++  }
++  return <div onClick={onClose}>Log context not available in this build.</div>;
++};

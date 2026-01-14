@@ -1,0 +1,3944 @@
+diff --git a/src/module.tsx b/src/module.tsx
+new file mode 100644
+index 0000000..89a0619
+--- /dev/null
++++ b/src/module.tsx
+@@ -0,0 +1,3938 @@
++import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
++import { createRoot, type Root } from 'react-dom/client';
++import {
++  CoreApp,
++  FALLBACK_COLOR,
++  FieldType,
++  LoadingState,
++  LogsDedupStrategy,
++  durationToMilliseconds,
++  formattedValueToString,
++  parseDuration,
++  getFieldDisplayValues,
++  getDisplayProcessor,
++  getFieldDisplayName,
++  getFieldSeriesColor,
++  PanelEvents,
++  PanelPlugin,
++  type DataQueryRequest,
++  type PanelData,
++  type DataFrameFieldIndex,
++  type PanelProps,
++  type TimeRange,
++  type DataFrame,
++  toDataFrame,
++} from '@grafana/data';
++import { LegendDisplayMode, LogsSortOrder, TooltipDisplayMode, defaultVizLegendOptions, type VizLegendOptions } from '@grafana/schema';
++import { Combobox, Select, SeriesIcon, SeriesTable, Switch, TextArea, TimeSeries, TooltipPlugin2, useTheme2, VizLayout, type ComboboxOption } from '@grafana/ui';
++import { getBackendSrv, locationService } from '@grafana/runtime';
++import { LogsPanel } from '../panels/logs/LogsPanel';
++import type { Options as LogsPanelOptions } from '../panels/logs/panelcfg.gen';
++
++interface LogFilterOptions {
++  showLogsqlTextarea?: boolean;
++  streamFieldList?: string;
++  logsqlVariable?: string;
++  hitsGroupFieldList?: string;
++  jsonConfig?: string;
++}
++
++type Option = { label: string; value: string };
++type Filter = { operator: string; value: string };
++type ExtraStreamFilterValue = { regexp?: string; group_name?: string };
++type ExtraStreamFilterRule = {
++  name: string;
++  if_exists?: { field: string; operator: string };
++  operator: string;
++  value?: ExtraStreamFilterValue;
++};
++
++type FixedFieldFilterRule = {
++  field: string;
++  text: string;
++  operator: string;
++};
++
++type JsonConfigShape = {
++  extra_stream_filter?: ExtraStreamFilterRule[];
++  fixed_field_filter?: FixedFieldFilterRule[];
++};
++
++type StringBuilder = {
++  append: (text: string) => StringBuilder;
++  toString: () => string;
++  clear: () => void;
++};
++
++type PieSlice = {
++  label: string;
++  value: number;
++  percent: number;
++  color: string;
++  hoverColor: string;
++  displayValue: string;
++  displayPercent: string;
++};
++
++type TimeSeriesLegendItem = {
++  label: string;
++  color: string;
++  fieldIndex: DataFrameFieldIndex;
++};
++
++type PieTooltipState = {
++  x: number;
++  y: number;
++  label: string;
++  color: string;
++  displayValue: string;
++  displayPercent: string;
++};
++
++const createStringBuilder = (initial = ''): StringBuilder => {
++  const parts: string[] = initial ? [initial] : [];
++  return {
++    append(text: string) {
++      parts.push(text);
++      return this;
++    },
++    toString() {
++      return parts.join('');
++    },
++    clear() {
++      parts.length = 0;
++    },
++  };
++};
++
++const readCookieValue = (key: string): string | null => {
++  if (typeof document === 'undefined') {
++    return null;
++  }
++  const parts = document.cookie.split(';').map((part) => part.trim());
++  const encodedKey = encodeURIComponent(key);
++  for (const part of parts) {
++    if (!part) {
++      continue;
++    }
++    const [rawName, ...rest] = part.split('=');
++    if (rawName === encodedKey) {
++      return decodeURIComponent(rest.join('='));
++    }
++  }
++  return null;
++};
++
++const writeCookieValue = (key: string, value: string, days = 30) => {
++  if (typeof document === 'undefined') {
++    return;
++  }
++  const maxAge = Math.floor(days * 24 * 60 * 60);
++  document.cookie = `${encodeURIComponent(key)}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}`;
++};
++
++const sysFields: Record<string, null> = {
++  _msg: null,
++  _stream: null,
++  _stream_id: null,
++  _time: null,
++};
++
++const operatorMap: Record<string, string> = {
++  '=': ':xxx',
++  '!=': ':!xxx',
++  '=~': ':~xxx',
++  '!~': ':!~xxx',
++};
++
++const defaultRecordCount = 50;
++const logUiCookieKey = 'victorialogs-logfilter-log-ui';
++
++const nameOfOperatorEqual = "equal";
++
++const stepIntervalMsMap: Record<string, number> = {
++  '1s': 1000,
++  '5s': 5000,
++  '10s': 10000,
++  '30s': 30000,
++  '1m': 60000,
++  '2m': 120000,
++  '5m': 300000,
++  '10m': 600000,
++  '20m': 1200000,
++  '30m': 1800000,
++  '1h': 3600000,
++};
++
++const stepComboboxOptions: Array<ComboboxOption<string>> = Object.keys(stepIntervalMsMap).map((value) => ({
++  label: value,
++  value,
++}));
++
++const logFontSizeOptions: Array<ComboboxOption<number>> = Array.from({ length: 14 }, (_value, idx) => {
++  const size = 11 + idx;
++  return { label: `${size}px`, value: size };
++});
++
++const getIntervalMsFromStep = (raw: unknown): number | undefined => {
++  if (typeof raw !== 'string') {
++    return undefined;
++  }
++  const key = raw.trim().toLowerCase();
++  if (!key) {
++    return undefined;
++  }
++  const mapped = stepIntervalMsMap[key];
++  if (mapped) {
++    return mapped;
++  }
++  try {
++    const duration = parseDuration(key);
++    const ms = durationToMilliseconds(duration);
++    if (Number.isFinite(ms) && ms > 0) {
++      return ms;
++    }
++  } catch {
++    return undefined;
++  }
++  return undefined;
++};
++
++const defaultTimeSeriesFieldsInput = 'level';
++
++const parseFieldsList = (raw: string): string[] =>
++  raw
++    .split(',')
++    .map((item) => item.trim())
++    .filter(Boolean);
++
++const decodeLegendLabel = (raw: unknown, fields: string[]): string | undefined => {
++  if (typeof raw !== 'string') {
++    return undefined;
++  }
++  const trimmed = raw.trim();
++  if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) {
++    return trimmed;
++  }
++  try {
++    const parsed = JSON.parse(trimmed) as Record<string, unknown> | null;
++    if (!parsed || typeof parsed !== 'object') {
++      return trimmed;
++    }
++    const values = fields.length
++      ? fields.map((key) => {
++        const value = parsed[key];
++        if (value === '' || value == null) {
++          return 'others';
++        }
++        return String(value);
++      })
++      : Object.values(parsed).map((value) => {
++        if (value === '' || value == null) {
++          return 'others';
++        }
++        return String(value);
++      });
++    const label = values.join(' ').trim();
++    return label.length ? label : 'others';
++  } catch {
++    return trimmed;
++  }
++};
++
++const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
++
++const normalizeHexColor = (color: string): string | null => {
++  const trimmed = color.trim();
++  if (!trimmed.startsWith('#')) {
++    return null;
++  }
++  const hex = trimmed.slice(1);
++  if (hex.length === 3) {
++    return `#${hex[0]}${hex[0]}${hex[1]}${hex[1]}${hex[2]}${hex[2]}`.toLowerCase();
++  }
++  if (hex.length === 6) {
++    return `#${hex.toLowerCase()}`;
++  }
++  return null;
++};
++
++const parseRgbColor = (color: string): { r: number; g: number; b: number; a?: number } | null => {
++  const match = color.trim().match(/^rgba?\(([^)]+)\)$/i);
++  if (!match) {
++    return null;
++  }
++  const parts = match[1].split(',').map((part) => part.trim());
++  if (parts.length < 3) {
++    return null;
++  }
++  const parseChannel = (value: string) => {
++    if (value.endsWith('%')) {
++      return clamp(Math.round(parseFloat(value) * 2.55), 0, 255);
++    }
++    return clamp(Math.round(parseFloat(value)), 0, 255);
++  };
++  const r = parseChannel(parts[0]);
++  const g = parseChannel(parts[1]);
++  const b = parseChannel(parts[2]);
++  const a = parts[3] != null ? clamp(parseFloat(parts[3]), 0, 1) : undefined;
++  if (![r, g, b].every(Number.isFinite)) {
++    return null;
++  }
++  return { r, g, b, a };
++};
++
++const toHex = (value: number) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, '0');
++
++const adjustColor = (color: string, amount: number): string => {
++  const hex = normalizeHexColor(color);
++  const adjustChannel = (value: number) => {
++    if (amount >= 0) {
++      return clamp(Math.round(value + (255 - value) * amount), 0, 255);
++    }
++    return clamp(Math.round(value * (1 + amount)), 0, 255);
++  };
++  if (hex) {
++    const r = parseInt(hex.slice(1, 3), 16);
++    const g = parseInt(hex.slice(3, 5), 16);
++    const b = parseInt(hex.slice(5, 7), 16);
++    return `#${toHex(adjustChannel(r))}${toHex(adjustChannel(g))}${toHex(adjustChannel(b))}`;
++  }
++  const rgb = parseRgbColor(color);
++  if (rgb) {
++    const r = adjustChannel(rgb.r);
++    const g = adjustChannel(rgb.g);
++    const b = adjustChannel(rgb.b);
++    if (rgb.a != null && Number.isFinite(rgb.a)) {
++      return `rgba(${r}, ${g}, ${b}, ${rgb.a})`;
++    }
++    return `rgb(${r}, ${g}, ${b})`;
++  }
++  return color;
++};
++
++const polarToCartesian = (cx: number, cy: number, radius: number, angleInDegrees: number) => {
++  const angleInRadians = (angleInDegrees * Math.PI) / 180;
++  return {
++    x: cx + radius * Math.cos(angleInRadians),
++    y: cy + radius * Math.sin(angleInRadians),
++  };
++};
++
++const describeArc = (cx: number, cy: number, radius: number, startAngle: number, endAngle: number) => {
++  const start = polarToCartesian(cx, cy, radius, endAngle);
++  const end = polarToCartesian(cx, cy, radius, startAngle);
++  const largeArcFlag = endAngle - startAngle <= 180 ? '0' : '1';
++  return `M ${cx} ${cy} L ${start.x} ${start.y} A ${radius} ${radius} 0 ${largeArcFlag} 0 ${end.x} ${end.y} Z`;
++};
++
++const logVolumeLegend: VizLegendOptions = {
++  ...defaultVizLegendOptions,
++  placement: (defaultVizLegendOptions.placement ?? 'bottom') as VizLegendOptions['placement'],
++  displayMode: LegendDisplayMode.List,
++  calcs: [],
++  showLegend: true,
++};
++
++const timeSeriesLegend: VizLegendOptions = {
++  ...logVolumeLegend,
++  showLegend: false,
++};
++
++const logVolumeFieldConfig = {
++  color: {
++    mode: 'palette-classic',
++    seriesBy: 'last',
++  },
++  custom: {
++    axisBorderShow: false,
++    axisCenteredZero: false,
++    axisColorMode: 'text',
++    axisLabel: '',
++    axisPlacement: 'auto',
++    barAlignment: 0,
++    barWidthFactor: 0.6,
++    drawStyle: 'bars',
++    fillOpacity: 50,
++    gradientMode: 'none',
++    hideFrom: {
++      legend: false,
++      tooltip: false,
++      viz: false,
++    },
++    insertNulls: false,
++    lineInterpolation: 'linear',
++    lineWidth: 2,
++    pointSize: 5,
++    scaleDistribution: {
++      log: 2,
++      type: 'symlog',
++    },
++    showPoints: 'always',
++    spanNulls: false,
++    stacking: {
++      group: 'A',
++      mode: 'normal',
++    },
++    thresholdsStyle: {
++      mode: 'off',
++    },
++  },
++  mappings: [],
++  noValue: 'no data found',
++  thresholds: {
++    mode: 'absolute',
++    steps: [
++      {
++        color: 'green',
++        value: 0,
++      },
++      {
++        color: 'red',
++        value: 80,
++      },
++    ],
++  },
++};
++
++const logVolumeVizOptions = {
++  legend: {
++    calcs: [],
++    displayMode: 'list',
++    placement: 'bottom',
++    showLegend: true,
++  },
++  tooltip: {
++    hideZeros: false,
++    mode: TooltipDisplayMode.Multi,
++    sort: 'none',
++  },
++};
++
++const logsPanelOptions: LogsPanelOptions = {
++  dedupStrategy: LogsDedupStrategy.exact,
++  enableInfiniteScrolling: false,
++  enableLogDetails: true,
++  prettifyLogMessage: false,
++  showCommonLabels: false,
++  showLabels: false,
++  showLogContextToggle: false,
++  showTime: true,
++  sortOrder: LogsSortOrder.Descending,
++  wrapLogMessage: true,
++};
++
++const pieChartFieldConfig = {
++  defaults: {
++    color: {
++      mode: 'palette-classic',
++    },
++    custom: {
++      hideFrom: {
++        legend: false,
++        tooltip: false,
++        viz: false,
++      },
++    },
++    mappings: [],
++  },
++  overrides: [],
++};
++
++const pieChartOptions = {
++  displayLabels: ['value', 'percent'],
++  legend: {
++    displayMode: 'table',
++    placement: 'right' as const,
++    showLegend: true,
++    values: ['percent', 'value'],
++  },
++  pieType: 'pie',
++  reduceOptions: {
++    calcs: ['sum'],
++    fields: '',
++    values: false,
++  },
++  tooltip: {
++    hideZeros: true,
++    mode: 'multi',
++    sort: 'desc',
++  },
++};
++
++const tooltipHoverModeAll = 1;
++
++const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
++  const {
++    height,
++    width,
++    timeRange,
++    timeZone,
++    data,
++    options,
++    eventBus,
++    onChangeTimeRange,
++    replaceVariables,
++    fieldConfig,
++    id,
++    transparent,
++    title,
++    renderCounter,
++    onFieldConfigChange,
++  } = props;
++  const theme = useTheme2();
++  const showLogsqlTextarea = options?.showLogsqlTextarea ?? true;
++  const logsqlVariable = options?.logsqlVariable ?? '\$logsql';
++  const configuredHitsGroupFields = (options?.hitsGroupFieldList ?? '').trim() || defaultTimeSeriesFieldsInput;
++  const panelWidth = width ?? 0;
++  const timeSeriesHeight = 180;
++  const pieChartWidth = panelWidth > 0 ? Math.max(240, Math.floor(panelWidth * 0.3)) : 240;
++  const timeSeriesWidth = Math.max(0, panelWidth - pieChartWidth - 12);
++  const [stepValue, setStepValue] = useState<string>(() => {
++    try {
++      return locationService.getSearch().get('var-step') ?? '1m';
++    } catch {
++      return '1m';
++    }
++  });
++  const [fullTextSearch, setFullTextSearch] = useState<string>('');
++  const [fullTextSearchOperator, setFullTextSearchOperator] = useState<string | null>(null);
++  const [fullTextSearchEnabled, setFullTextSearchEnabled] = useState<boolean>(false);
++  const [messageFilterEnabled, setMessageFilterEnabled] = useState<boolean>(false);
++  const [messageValue, setMessageValue] = useState<string>('');
++  const [limitEnabled, setLimitEnabled] = useState<boolean>(true);
++  const [limitValue, setLimitValue] = useState<string>('100');
++  const [useGlobalSort, setUseGlobalSort] = useState<boolean>(false);
++  const [globalSortField, setGlobalSortField] = useState<string>('_time');
++  const [globalSortDesc, setGlobalSortDesc] = useState<boolean>(true);
++  const [removeFieldsEnabled, setRemoveFieldsEnabled] = useState<boolean>(false);
++  const [removeFieldsText, setRemoveFieldsText] = useState<string>('');
++  const [cascadeFiltering, setCascadeFiltering] = useState<boolean>(true);
++  const [jsonConfig, setJsonConfig] = useState<string>(options?.jsonConfig ?? '');
++  const [outputAllFields, setOutputAllFields] = useState<boolean>(true);
++  const [testResult, setTestResult] = useState<string>('');
++  const [testError, setTestError] = useState<string>('');
++  const [datasourceUid, setDatasourceUid] = useState<string | null>(null);
++  const [datasourceId, setDatasourceId] = useState<number | null>(null);
++  const [filterByStreamFields, setFilterByStreamFields] = useState<boolean>(true);
++  const [logsqlValue, setLogsqlValue] = useState<string>('');
++  const [logsExpandAll, setLogsExpandAll] = useState<boolean>(false);
++  const [showLogsJson, setShowLogsJson] = useState<boolean>(false);
++  const [timeSeriesFieldsApplied, setTimeSeriesFieldsApplied] = useState<string>(configuredHitsGroupFields);
++  const [logSearchInput, setLogSearchInput] = useState<string>('');
++  const [logHighlightTerm, setLogHighlightTerm] = useState<string>('');
++  const [logTagsWrap, setLogTagsWrap] = useState<boolean>(true);
++  const [logFontSize, setLogFontSize] = useState<number>(12);
++  const [saveLogUiToCookie, setSaveLogUiToCookie] = useState<boolean>(false);
++  const timeRangeRef = useRef<TimeRange | undefined>(timeRange);
++  const datasourceVarValueRef = useRef<string | null>(null);
++  const logsqlVarValueRef = useRef<string>('');
++  const valueSelectRoots = useMemo(() => new WeakMap<HTMLElement, Root>(), []);
++  const streamFieldMapRef = useRef<Record<string, null>>({});
++  const fieldMapRef = useRef<Record<string, any>>({});  // 第一次查询得到的 field names 列表
++  const fieldsAfterStreamFilterRef = useRef<Record<string, null>>({});  // stream fields 过滤后的字段
++  const streamFiltersRef = useRef<Record<string, Filter>>({}); // 当前已经选中的
++  const fieldFiltersRef = useRef<Record<string, Filter>>({});
++  const msgFiltersRef = useRef<Record<string, Filter>>({});
++  const fulltextFiltersRef = useRef<Record<string, Filter>>({});
++  const jsonConfigRef = useRef<JsonConfigShape | null>(null);  // 存在面板配置中的 json config
++  const [timeSeriesFrames, setTimeSeriesFrames] = useState<DataFrame[]>([]);
++  const [logsFrames, setLogsFrames] = useState<DataFrame[]>([]);
++  const [logsLoading, setLogsLoading] = useState<boolean>(false);
++  const [logsError, setLogsError] = useState<string>('');
++  const [logsQueryDuration, setLogsQueryDuration] = useState<number>(0);
++  const [hitsQueryDuration, setHitsQueryDuration] = useState<number>(0);
++  const [selectedSeries, setSelectedSeries] = useState<DataFrameFieldIndex | null>(null);
++  const [pieTooltip, setPieTooltip] = useState<PieTooltipState | null>(null);
++  // 根据顺序进行加载的 stream field 数据
++  const streamFieldIndexMapRef = useRef<Record<number, string>>({});
++  const defaultFieldOperatorOptions: Option[] = [
++    { label: ':= (equal)', value: ':=xxx' },
++    { label: ':i() (equal, ignore case)', value: ':i(xxx)' },
++    { label: ':! (not equal)', value: ':!xxx' },
++    { label: ':~ (regexp match)', value: ':~xxx' },
++    { label: ':!~ (not match)', value: ':!~xxx' },
++    { label: ':xxx* (prefix)', value: ':xxx*' },
++    { label: ':*xxx* (substring)', value: ':*xxx*' },
++    //{ label: 'in', value: 'in(xxx)' },
++    { label: ':> (great)', value: ':>xxx' },
++    { label: ':>= (great equal)', value: ':>=xxx' },
++    { label: ':< (less)', value: ':<xxx' },
++    { label: ':<= (less equal)', value: ':<=xxx' },
++    // { label: 'range', value: ':range(a,b)' },
++    // { label: 'string_range', value: ':string_range(a,b)' },
++    // { label: ':le_field (less equal than a field)', value: ':le_field($field)' },
++    // { label: ':eq_field (equal a field)', value: ':eq_field($field)' },
++    // { label: ':lt_field (less than a field)', value: ':lt_field($field)' },
++  ];
++  //let hasLogsqlAtUrl = false;
++  let firstTimeLogsql = '';  // 刚刚加载面板时候得到的 logsql
++
++  const pieChartData = useMemo(() => {
++    const fieldDisplayValues = getFieldDisplayValues({
++      fieldConfig: pieChartFieldConfig,
++      reduceOptions: pieChartOptions.reduceOptions,
++      data: timeSeriesFrames,
++      theme,
++      replaceVariables,
++      timeZone,
++    });
++    if (!fieldDisplayValues.length) {
++      return { slices: [] as PieSlice[], total: 0 };
++    }
++    const slices: Array<Omit<PieSlice, 'percent' | 'displayPercent'>> = [];
++    let total = 0;
++    for (let i = 0; i < fieldDisplayValues.length; i++) {
++      const item = fieldDisplayValues[i];
++      const value = Number(item.display.numeric);
++      if (!Number.isFinite(value)) {
++        continue;
++      }
++      if (pieChartOptions.tooltip.hideZeros && value <= 0) {
++        continue;
++      }
++      const label = item.display.title ?? item.name ?? `Series ${i + 1}`;
++      const palette = theme.visualization.palette;
++      const paletteColor = palette[i % palette.length] ?? FALLBACK_COLOR;
++      const rawColor = item.display.color ?? theme.visualization.getColorByName(paletteColor);
++      const color = adjustColor(rawColor, -0.2);
++      const hoverColor = rawColor;
++      slices.push({
++        label,
++        value,
++        color,
++        hoverColor,
++        displayValue: formattedValueToString(item.display),
++      });
++      total += value;
++    }
++    if (!Number.isFinite(total) || total <= 0) {
++      return { slices: [] as PieSlice[], total: 0 };
++    }
++    if (pieChartOptions.tooltip.sort === 'desc') {
++      slices.sort((a, b) => b.value - a.value);
++    } else if (pieChartOptions.tooltip.sort === 'asc') {
++      slices.sort((a, b) => a.value - b.value);
++    }
++    const finalSlices = slices.map((slice) => {
++      const percent = (slice.value / total) * 100;
++      return {
++        ...slice,
++        percent,
++        displayPercent: `${percent.toFixed(1)}%`,
++      };
++    });
++    return { slices: finalSlices, total };
++  }, [replaceVariables, theme, timeSeriesFrames, timeZone]);
++
++  const timeSeriesLegendItems = useMemo(() => {
++    const items: TimeSeriesLegendItem[] = [];
++    timeSeriesFrames.forEach((frame, frameIndex) => {
++      frame.fields.forEach((field, fieldIndex) => {
++        if (field.type !== FieldType.number && field.type !== FieldType.enum) {
++          return;
++        }
++        if (field.config?.custom?.hideFrom?.legend) {
++          return;
++        }
++        const label = getFieldDisplayName(field, frame, timeSeriesFrames);
++        const seriesColor = getFieldSeriesColor(field, theme).color ?? FALLBACK_COLOR;
++        items.push({
++          label,
++          color: seriesColor,
++          fieldIndex: { frameIndex, fieldIndex },
++        });
++      });
++    });
++    return items;
++  }, [theme, timeSeriesFrames]);
++
++  const timeSeriesFramesForViz = useMemo(() => {
++    if (!selectedSeries) {
++      return timeSeriesFrames;
++    }
++    return timeSeriesFrames.map((frame, frameIndex) => {
++      const nextFields = frame.fields.map((field, fieldIndex) => {
++        if (field.type !== FieldType.number && field.type !== FieldType.enum) {
++          return field;
++        }
++        const shouldShow = frameIndex === selectedSeries.frameIndex && fieldIndex === selectedSeries.fieldIndex;
++        const currentHideFrom = field.config?.custom?.hideFrom;
++        const nextHideFrom = {
++          ...currentHideFrom,
++          viz: shouldShow ? currentHideFrom?.viz ?? false : true,
++        };
++        return {
++          ...field,
++          config: {
++            ...field.config,
++            custom: {
++              ...(field.config?.custom ?? {}),
++              hideFrom: nextHideFrom,
++            },
++          },
++        };
++      });
++      return { ...frame, fields: nextFields };
++    });
++  }, [selectedSeries, timeSeriesFrames]);
++
++  useEffect(() => {
++    if (!selectedSeries) {
++      return;
++    }
++    const isValid = timeSeriesLegendItems.some(
++      (item) =>
++        item.fieldIndex.frameIndex === selectedSeries.frameIndex &&
++        item.fieldIndex.fieldIndex === selectedSeries.fieldIndex
++    );
++    if (!isValid) {
++      setSelectedSeries(null);
++    }
++  }, [selectedSeries, timeSeriesLegendItems]);
++
++  const updatePieTooltip = useCallback((event: React.MouseEvent<SVGPathElement>, slice: PieSlice) => {
++    const svg = event.currentTarget.ownerSVGElement;
++    if (!svg) {
++      return;
++    }
++    const rect = svg.getBoundingClientRect();
++    setPieTooltip({
++      x: event.clientX - rect.left,
++      y: event.clientY - rect.top,
++      label: slice.label,
++      color: slice.hoverColor,
++      displayValue: slice.displayValue,
++      displayPercent: slice.displayPercent,
++    });
++  }, []);
++
++  const clearPieTooltip = useCallback(() => {
++    setPieTooltip(null);
++  }, []);
++
++  const onLogsPanelOptionsChange = useCallback((_next: LogsPanelOptions) => {
++    // Logs panel options are fixed for this custom panel.
++  }, []);
++
++  const applyLogTagFilter = (
++    tagName: string,
++    tagValue: string,
++    fieldOperator: Option,
++    streamOperator: string
++  ) => {
++    if (!tagName) {
++      return;
++    }
++    // 当前字段如果属于 stream field，则走 stream 过滤器
++    if (Object.prototype.hasOwnProperty.call(streamFieldMapRef.current, tagName)) {
++      // Stream labels must be filtered via stream filters to avoid empty results.
++      getFieldsByStreamFields(tagName, streamOperator, tagValue);
++      return;
++    }
++    createOrUpdateFieldFilterData(tagName, fieldOperator.value, fieldOperator.label, tagValue);
++  };
++
++  const onLogTagFilter = useCallback((_tagName: string, _tagValue: string) => {
++    applyLogTagFilter(_tagName, _tagValue, defaultFieldOperatorOptions[0], '=');
++  }, []);
++
++  const onLogTagExclude = useCallback((_tagName: string, _tagValue: string) => {
++    applyLogTagFilter(_tagName, _tagValue, defaultFieldOperatorOptions[2], '!=');
++  }, []);
++
++  // 日志行上，点击了隐藏某个字段的按钮
++  const onLogTagHide = (_tagName: string, _tagValue: string) => {
++    const tagName = _tagName.trim();
++    if (!tagName) {
++      return;
++    }
++    setRemoveFieldsEnabled(true);
++    setRemoveFieldsText((prev) => {
++      const fields = parseRemoveFieldsText(prev);
++      if (!fields.includes(tagName)) {
++        fields.push(tagName);
++      }
++      const mode = prev.includes('\n') ? 'multi' : 'single';
++      const nextText = formatRemoveFieldsText(fields, mode);
++      generateLogsQL(true, { enabled: true, text: nextText });
++      return nextText;
++    });
++  };
++
++  const onLegendItemClick = useCallback((item: TimeSeriesLegendItem) => {
++    setSelectedSeries((prev) => {
++      if (prev && prev.frameIndex === item.fieldIndex.frameIndex && prev.fieldIndex === item.fieldIndex.fieldIndex) {
++        return null;
++      }
++      return { ...item.fieldIndex };
++    });
++  }, []);
++
++  useEffect(() => {
++    const raw = readCookieValue(logUiCookieKey);
++    if (!raw) {
++      return;
++    }
++    try {
++      const parsed = JSON.parse(raw) as {
++        expandAll?: boolean;
++        wrapTags?: boolean;
++        fontSize?: number;
++      };
++      if (typeof parsed.expandAll === 'boolean') {
++        setLogsExpandAll(parsed.expandAll);
++      }
++      if (typeof parsed.wrapTags === 'boolean') {
++        setLogTagsWrap(parsed.wrapTags);
++      }
++      if (typeof parsed.fontSize === 'number' && Number.isFinite(parsed.fontSize)) {
++        setLogFontSize(parsed.fontSize);
++      }
++    } catch (err) {
++      console.error('read log ui cookie failed', err);
++    }
++  }, []);
++
++  useEffect(() => {
++    setTimeSeriesFieldsApplied(configuredHitsGroupFields);
++  }, [configuredHitsGroupFields]);
++
++  useEffect(() => {
++    if (!saveLogUiToCookie) {
++      return;
++    }
++    const payload = JSON.stringify({
++      expandAll: logsExpandAll,
++      wrapTags: logTagsWrap,
++      fontSize: logFontSize,
++    });
++    writeCookieValue(logUiCookieKey, payload, 180);
++  }, [logFontSize, logTagsWrap, logsExpandAll, saveLogUiToCookie]);
++
++  const onQueryZoom = useCallback(
++    (range: { from: number; to: number }) => {
++      const from = Math.min(range.from, range.to);
++      const to = Math.max(range.from, range.to);
++      if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) {
++        return;
++      }
++      onChangeTimeRange({ from, to });
++    },
++    [onChangeTimeRange]
++  );
++
++  const timeSeriesLegendHeight = timeSeriesLegendItems.length > 0 ? 56 : 0;
++  const timeSeriesPlotHeight = Math.max(0, timeSeriesHeight - timeSeriesLegendHeight);
++  const logsMaxLines = useMemo(() => {
++    if (limitEnabled) {
++      const num = Number(limitValue);
++      if (Number.isFinite(num) && num > 0) {
++        return Math.floor(num);
++      }
++    }
++    return 1000;
++  }, [limitEnabled, limitValue]);
++  const logsCount = useMemo(() => {
++    return logsFrames.reduce((sum, frame) => {
++      const length =
++        typeof frame.length === 'number'
++          ? frame.length
++          : frame.fields.reduce((max, field) => Math.max(max, field.values.length), 0);
++      return sum + (Number.isFinite(length) ? length : 0);
++    }, 0);
++  }, [logsFrames]);
++  const timeSeriesQueryFields = useMemo(() => {
++    const parsed = parseFieldsList(timeSeriesFieldsApplied);
++    if (parsed.length > 0) {
++      return parsed;
++    }
++    return parseFieldsList(configuredHitsGroupFields);
++  }, [configuredHitsGroupFields, timeSeriesFieldsApplied]);
++  const logsJsonText = useMemo(() => {
++    if (!showLogsJson) {
++      return '';
++    }
++    const formatLogJsonTime = (raw: unknown): string | null => {
++      if (raw == null) {
++        return null;
++      }
++      if (raw instanceof Date) {
++        return Number.isNaN(raw.getTime()) ? null : raw.toISOString();
++      }
++      if (typeof raw === 'number') {
++        if (!Number.isFinite(raw)) {
++          return null;
++        }
++        const abs = Math.abs(raw);
++        let ms = raw;
++        if (abs < 1e11) {
++          ms = raw * 1000;
++        } else if (abs > 1e14) {
++          ms = Math.floor(raw / 1e6);
++        }
++        const date = new Date(ms);
++        return Number.isNaN(date.getTime()) ? null : date.toISOString();
++      }
++      const parsed = Date.parse(String(raw));
++      if (Number.isFinite(parsed)) {
++        return new Date(parsed).toISOString();
++      }
++      return String(raw);
++    };
++    const mergeLabels = (row: Record<string, unknown>, rawValue: unknown) => {
++      if (!rawValue) {
++        return;
++      }
++      if (Array.isArray(rawValue)) {
++        rawValue.forEach((item) => {
++          if (typeof item !== 'string') {
++            return;
++          }
++          const idx = item.indexOf(':');
++          if (idx === -1) {
++            const key = item.trim();
++            if (key) {
++              row[key] = '';
++            }
++            return;
++          }
++          const key = item.slice(0, idx).trim();
++          const value = item.slice(idx + 1).trim().replace(/^"|"$/g, '');
++          if (key) {
++            row[key] = value;
++          }
++        });
++        return;
++      }
++      if (typeof rawValue === 'object') {
++        Object.entries(rawValue as Record<string, unknown>).forEach(([key, value]) => {
++          if (key) {
++            row[key] = value ?? '';
++          }
++        });
++      }
++    };
++    const rows: Array<Record<string, unknown>> = [];
++    logsFrames.forEach((frame) => {
++      const length =
++        typeof frame.length === 'number'
++          ? frame.length
++          : frame.fields.reduce((max, field) => Math.max(max, field.values.length), 0);
++      for (let rowIndex = 0; rowIndex < length; rowIndex++) {
++        const row: Record<string, unknown> = {};
++        frame.fields.forEach((field) => {
++          const values: any = field.values as any;
++          const value =
++            values && typeof values.get === 'function' ? values.get(rowIndex) : values?.[rowIndex];
++          const fieldName = field.name === 'Time' ? '_time' : field.name === 'Line' ? '_msg' : field.name;
++          if (fieldName === 'labels') {
++            mergeLabels(row, value);
++            return;
++          }
++          if (fieldName === '_time') {
++            row['_time'] = formatLogJsonTime(value);
++            return;
++          }
++          if (fieldName === '_msg') {
++            row['_msg'] = value ?? null;
++            return;
++          }
++          row[fieldName] = value ?? null;
++        });
++        rows.push(row);
++      }
++    });
++    return rows.map((row) => JSON.stringify(row)).join('\n');
++  }, [logsFrames, showLogsJson]);
++
++  const parseRemoveFieldsText = (raw: string): string[] => {
++    const trimmed = raw.trim();
++    if (!trimmed) {
++      return [];
++    }
++    let text = trimmed;
++    // if (text.startsWith('|')) {
++    //   text = text.slice(1).trim();
++    // }
++    // if (text.toLowerCase().startsWith('delete')) {
++    //   text = text.slice('delete'.length).trim();
++    // }
++    const fields: string[] = [];
++    text.split('\n').forEach((line) => {
++      line
++        .split(',')
++        .map((part) => part.trim())
++        .filter(Boolean)
++        .forEach((part) => fields.push(part));
++    });
++    return fields;
++  };
++
++  const formatRemoveFieldsText = (fields: string[], mode: 'single' | 'multi'): string => {
++    if (fields.length === 0) {
++      return '';
++    }
++    const separator = mode === 'single' ? ', ' : ',\n';
++    return fields.join(separator);
++  };
++
++  const logsPanelData = useMemo<PanelData>(() => {
++    const target = {
++      datasource: datasourceUid ? { type: 'victoriametrics-logs-datasource', uid: datasourceUid } : undefined,
++      editorMode: 'code',
++      expr: logsqlValue,
++      queryType: 'instant',
++      refId: 'A',
++    };
++    const baseRequest = data.request;
++    const interval = stepValue || baseRequest?.interval || '1m';
++    const intervalMs = getIntervalMsFromStep(stepValue) ?? baseRequest?.intervalMs ?? 0;
++    const app = baseRequest?.app ?? CoreApp.Dashboard;
++    const request: DataQueryRequest = baseRequest
++      ? {
++        ...baseRequest,
++        app,
++        targets: [target],
++      }
++      : {
++        app,
++        requestId: 'log-filter-logs',
++        interval,
++        intervalMs,
++        range: timeRange,
++        scopedVars: data.request?.scopedVars ?? {},
++        targets: [target],
++        timezone: timeZone,
++        startTime: Date.now(),
++      };
++    return {
++      ...data,
++      series: logsFrames,
++      state: logsLoading ? LoadingState.Loading : logsError ? LoadingState.Error : LoadingState.Done,
++      timeRange,
++      request,
++      error: logsError ? ({ message: logsError } as any) : undefined,
++      errors: logsError ? ([{ message: logsError }] as any) : undefined,
++    };
++  }, [data, datasourceUid, logsqlValue, logsFrames, logsLoading, logsError, stepValue, timeRange, timeZone]);
++
++  // 设置一个 select 控件的选项
++  const setSelectOptions = (id: string, options: Option[]) => {
++    const select = document.getElementById(id) as HTMLSelectElement | null;
++    if (!select) {
++      return;
++    }
++    while (select.options.length > 0) {
++      select.remove(select.options.length - 1);
++    }
++    for (const option of options) {
++      const opt = document.createElement('option');
++      opt.value = option.value;
++      opt.textContent = option.label;
++      select.appendChild(opt);
++    }
++  }
++
++  const onFullTextSearchBlur = (val: string) => {
++    if (!fullTextSearchEnabled) {
++      return;
++    }
++    const op = fullTextSearchOperator ?? '';
++    const value = val ?? '';
++    if (!op || !value) {
++      return;
++    }
++    fulltextFiltersRef.current['fulltext'] = { operator: op, value };
++    generateLogsQL(true);
++  };
++
++  const onFullTextSearchToggle = (next: boolean) => {
++    setFullTextSearchEnabled(next);
++    if (!next) {
++      setFullTextSearch('');
++      setFullTextSearchOperator(null);
++      delete fulltextFiltersRef.current['fulltext'];
++    }
++    generateLogsQL(true);
++  };
++
++  const onMessageToggle = (next: boolean) => {
++    setMessageFilterEnabled(next);
++    if (!next) {
++      setMessageValue('');
++      delete msgFiltersRef.current['_msg'];
++    }
++    generateLogsQL(true);
++  };
++
++  // 查询当前的数据源 id
++  const resolveDatasourceUid = useCallback(async (): Promise<string | null> => {
++    const targets = (data as any)?.request?.targets;
++    let datasourceFromVar: string | null = null;
++    try {
++      datasourceFromVar =
++        locationService.getSearch().get('var-ds') ??
++        locationService.getSearch().get('var-datasource') ??
++        datasourceVarValueRef.current;
++    } catch (err) {
++      console.error('resolveDatasourceUid: failed to read datasource variable', err);
++    }
++    const fallbackUid =
++      datasourceUid ??
++      targets?.[0]?.datasource?.uid ??
++      (window as any)?.__grafanaSceneContext?.meta?.data?.request?.targets?.[0]?.datasource?.uid ??
++      (window as any)?.__grafana_data?.request?.targets?.[0]?.datasource?.uid;
++    let list: any[] | undefined;
++
++    if (datasourceFromVar) {
++      if (datasourceFromVar === fallbackUid) {
++        setDatasourceUid(datasourceFromVar);
++        return datasourceFromVar;
++      }
++      try {
++        list = await getBackendSrv().get('/api/datasources');
++        const matched = list?.find?.(
++          (ds: any) => ds.uid === datasourceFromVar || ds.name === datasourceFromVar
++        )?.uid;
++        if (matched) {
++          setDatasourceUid(matched);
++          return matched;
++        }
++      } catch (err) {
++        console.error('resolveDatasourceUid: failed to list datasources', err);
++      }
++    }
++
++    if (fallbackUid && !datasourceFromVar) {
++      setDatasourceUid(fallbackUid);
++      return fallbackUid;
++    }
++
++    try {
++      const dsList = list ?? (await getBackendSrv().get('/api/datasources'));
++      const uid = dsList?.find?.((ds: any) => ds.type === 'victoriametrics-logs-datasource')?.uid;
++      if (uid) {
++        setDatasourceUid(uid);
++        return uid;
++      }
++    } catch (err) {
++      console.error('resolveDatasourceUid: failed to list datasources', err);
++    }
++
++    setTestError('Could not resolve datasource uid');
++    setTestResult('');
++    return null;
++  }, [data, datasourceUid]);
++
++  const resolveDatasourceId = useCallback(
++    async (uid: string | null): Promise<number | null> => {
++      if (datasourceId != null) {
++        return datasourceId;
++      }
++      const targets = (data as any)?.request?.targets;
++      const idFromTargets =
++        targets?.[0]?.datasource?.id ??
++        (window as any)?.__grafanaSceneContext?.meta?.data?.request?.targets?.[0]?.datasource?.id ??
++        (window as any)?.__grafana_data?.request?.targets?.[0]?.datasource?.id;
++      if (Number.isFinite(idFromTargets)) {
++        const numericId = Number(idFromTargets);
++        setDatasourceId(numericId);
++        return numericId;
++      }
++      if (!uid) {
++        return null;
++      }
++      try {
++        const ds = await getBackendSrv().get(`/api/datasources/uid/${uid}`);
++        const id = ds?.id;
++        if (Number.isFinite(id)) {
++          const numericId = Number(id);
++          setDatasourceId(numericId);
++          return numericId;
++        }
++      } catch (err) {
++        console.error('resolveDatasourceId: failed to get datasource', err);
++      }
++      return null;
++    },
++    [data, datasourceId]
++  );
++
++  // 通过 tips 查询，填充 Time Series 数据
++  const loadTimeSeriesData = useCallback(
++    async (stepOverride?: string, fieldsOverride?: string[]): Promise<DataFrame[]> => {
++    const startTs = timeRangeRef.current?.from?.valueOf();
++    const endTs = timeRangeRef.current?.to?.valueOf();
++    const logsqlEl = document.getElementById('logsql') as HTMLTextAreaElement | null;
++    const logsql = logsqlEl?.value ?? '';
++    const dsUid = await resolveDatasourceUid();
++    const dsId = await resolveDatasourceId(dsUid);
++    const fieldsForQuery =
++      fieldsOverride && fieldsOverride.length > 0 ? fieldsOverride : timeSeriesQueryFields;
++    let intervalMsFromStep: number | undefined;
++    try {
++      const stepFromUrl = locationService.getSearch().get('var-step');
++      intervalMsFromStep =
++        getIntervalMsFromStep(stepOverride ?? stepValue) ??
++        getIntervalMsFromStep(stepFromUrl ?? undefined);
++    } catch {
++      intervalMsFromStep = getIntervalMsFromStep(stepOverride ?? stepValue);
++    }
++    const fallbackIntervalMs = (data as any)?.request?.intervalMs ?? 60000;
++    const intervalMs = intervalMsFromStep ?? fallbackIntervalMs;
++
++    if (!startTs || !endTs || !logsql || !dsUid) {
++      setTimeSeriesFrames([]);
++      setHitsQueryDuration(0);
++      return [];
++    }
++
++    const queryStart = performance.now();
++
++    const body = {
++      queries: [
++        {
++          datasource: { type: 'victoriametrics-logs-datasource', uid: dsUid },
++          datasourceId: dsId ?? 0,
++          editorMode: 'code',
++          expr: logsql,
++          fields: fieldsForQuery,
++          legendFormat: '',
++          queryType: 'hits',
++          refId: 'A',
++          maxLines: 1000,
++          intervalMs,
++          maxDataPoints: 2221,
++          //maxDataPoints: (data as any)?.request?.maxDataPoints ?? 500,
++        },
++      ],
++      from: String(startTs),
++      to: String(endTs),
++    };
++
++    try {
++      const requestId = `SQR${Math.random().toString(36).slice(2, 10)}`;
++      const resp = await getBackendSrv().post(
++        `/api/ds/query?ds_type=victoriametrics-logs-datasource&requestId=${requestId}`, // 调用后端查询接口
++        body // 查询请求体
++      );
++      const frames = resp?.results?.A?.frames; // 提取数据帧
++      if (Array.isArray(frames)) {
++        showJSLog('loadTimeSeriesData: got frames', 'green');
++        const parsed = frames.map((f: any) => toDataFrame(f)); // 将返回数据转为 DataFrame
++        let seriesIndex = 0;
++        const configured = parsed.map((frame) => {
++          const decodedFrameName = decodeLegendLabel(frame.name, fieldsForQuery);
++          const cfgFields = frame.fields.map((fld: any) => {
++            const mergedCustom = {
++              ...(logVolumeFieldConfig.custom ?? {}),
++              ...(fld?.config?.custom ?? {}),
++              axisCenteredZero: logVolumeFieldConfig.custom?.axisCenteredZero,
++              //axisSoftMin: undefined,
++              //axisSoftMax: undefined,
++              drawStyle: logVolumeFieldConfig.custom?.drawStyle,
++              stacking: logVolumeFieldConfig.custom?.stacking,
++              scaleDistribution: logVolumeFieldConfig.custom?.scaleDistribution,
++            }; // 合并并覆盖关键配置
++            const decodedDisplayName = decodeLegendLabel(fld?.config?.displayNameFromDS, fieldsForQuery);
++            const nextField = {
++              ...fld, // 保留原字段
++              config: {
++                ...logVolumeFieldConfig, // 应用默认字段配置
++                ...(fld?.config ?? {}), // 覆盖已有配置
++                displayNameFromDS: decodedDisplayName ?? fld?.config?.displayNameFromDS,
++                color: logVolumeFieldConfig.color,
++                //min: undefined,
++                //max: undefined,
++                noValue: logVolumeFieldConfig.noValue,
++                custom: mergedCustom, // 使用合并后的 custom
++              },
++            };
++            if (nextField.type === FieldType.time) {
++              nextField.config = {
++                ...nextField.config,
++                interval: intervalMs,
++              };
++            }
++            if (nextField.type === FieldType.number || nextField.type === FieldType.enum) {
++              nextField.state = { ...(nextField.state ?? {}), seriesIndex };
++              seriesIndex += 1;
++            }
++            return {
++              ...nextField,
++              display: getDisplayProcessor({ field: nextField, timeZone, theme }),
++            };
++          }); // 结束字段映射
++          return {
++            ...frame, // 返回调整后的 frame
++            name: decodedFrameName ?? frame.name, // 设置新的名称
++            fields: cfgFields, // 使用带配置的字段
++          };
++        }); // 结束 frame 映射
++        setTimeSeriesFrames(configured); // 更新状态用于渲染
++        setTestError(''); // 清除错误提示
++        return configured; // 返回处理后的数据
++      }
++      setTimeSeriesFrames([]); // 非数组则清空
++      return []; // 返回空数组
++    } catch (err: any) {
++      console.error('loadTimeSeriesData failed', err); // 打印错误
++      setTimeSeriesFrames([]); // 出错时清空数据
++      setTestError(err?.statusText ?? 'Failed to load time series data'); // 展示错误信息
++      return []; // 返回空数组
++    } finally {
++      const durationMs = Math.max(0, Math.round(performance.now() - queryStart));
++      setHitsQueryDuration(durationMs);
++    }
++  }, [data, resolveDatasourceUid, resolveDatasourceId, stepValue, theme, timeSeriesQueryFields, timeZone]);
++
++  const loadLogsData = useCallback(
++    async (logsqlOverride?: string): Promise<DataFrame[]> => {
++      const startTs = timeRangeRef.current?.from?.valueOf();
++      const endTs = timeRangeRef.current?.to?.valueOf();
++      const dsUid = await resolveDatasourceUid();
++      const dsId = await resolveDatasourceId(dsUid);
++      const logsql = (logsqlOverride ?? getLogsqlFromURL()).trim();
++
++      if (!startTs || !endTs || !logsql || !dsUid) {
++        setLogsFrames([]);
++        setLogsError('');
++        setLogsLoading(false);
++        setLogsQueryDuration(0);
++        return [];
++      }
++
++      setLogsLoading(true);
++      setLogsError('');
++      const queryStart = performance.now();
++
++      const body = {
++        queries: [
++          {
++            datasource: { type: 'victoriametrics-logs-datasource', uid: dsUid },
++            datasourceId: dsId ?? 0,
++            editorMode: 'code',
++            expr: logsql,
++            queryType: 'instant',
++            refId: 'A',
++            maxLines: logsMaxLines,
++          },
++        ],
++        from: String(startTs),
++        to: String(endTs),
++      };
++
++      try {
++        const requestId = `SQR${Math.random().toString(36).slice(2, 10)}`;
++        const resp = await getBackendSrv().post(
++          `/api/ds/query?ds_type=victoriametrics-logs-datasource&requestId=${requestId}`,
++          body
++        );
++        const frames = resp?.results?.A?.frames;
++        if (Array.isArray(frames)) {
++          const parsed = frames.map((f: any) => toDataFrame(f));
++          setLogsFrames(parsed);
++          return parsed;
++        }
++        setLogsFrames([]);
++        return [];
++      } catch (err: any) {
++        console.error('loadLogsData failed', err);
++        setLogsError(err?.statusText ?? 'Failed to load logs');
++        setLogsFrames([]);
++        return [];
++      } finally {
++        setLogsLoading(false);
++        const durationMs = Math.max(0, Math.round(performance.now() - queryStart));
++        setLogsQueryDuration(durationMs);
++      }
++    },
++    [logsMaxLines, logsqlVariable, resolveDatasourceId, resolveDatasourceUid]
++  );
++
++  const applyTimeSeriesFieldsInput = useCallback(
++    (rawValue: string) => {
++      const nextValue = rawValue ?? '';
++      const fields = parseFieldsList(nextValue);
++      const resolvedValue = fields.length > 0 ? nextValue : configuredHitsGroupFields;
++      setTimeSeriesFieldsApplied(resolvedValue);
++    },
++    [configuredHitsGroupFields]
++  );
++
++  // 步长变化时的处理
++  const onStepValueChanged = useCallback(
++    (nextValue: string) => {
++      if (!nextValue) {
++        return;
++      }
++      try {
++        locationService.partial({ 'var-step': nextValue }, true);
++      } catch (err) {
++        console.error('update step value failed', err);
++      }
++      void loadTimeSeriesData(nextValue);
++    },
++    [loadTimeSeriesData]
++  );
++
++  const onStepComboboxChange = useCallback(
++    (option: ComboboxOption<string>) => {
++      const nextValue = option?.value ?? '1m';
++      setStepValue(nextValue);
++      onStepValueChanged(nextValue);
++    },
++    [onStepValueChanged]
++  );
++
++  useEffect(() => {
++    void loadTimeSeriesData();
++  }, [loadTimeSeriesData]);
++
++  useEffect(() => {
++    const getLogsqlVarKey = () => {
++      let varKey = `var-${logsqlVariable}`;
++      if (logsqlVariable.startsWith('$')) {
++        varKey = `var-` + logsqlVariable.substring(1);
++      }
++      return varKey;
++    };
++
++    const readLogsqlVariable = () => {
++      const varKey = getLogsqlVarKey();
++      try {
++        return locationService.getSearch().get(varKey) ?? '';
++      } catch (err) {
++        console.error('read logsql variable from url failed', err);
++        return '';
++      }
++    };
++
++    const syncLogsqlValue = (value: string) => {
++      logsqlVarValueRef.current = value;
++      setLogsqlValue(value);
++      const logsqlEl = document.getElementById('logsql') as HTMLTextAreaElement | null;
++      if (logsqlEl && logsqlEl.value !== value) {
++        logsqlEl.value = value;
++      }
++      if (!value) {
++        setLogsFrames([]);
++        setLogsError('');
++        setLogsLoading(false);
++        setTimeSeriesFrames([]);
++        return;
++      }
++      void loadLogsData(value);
++      void loadTimeSeriesData();
++    };
++
++    const initialValue = readLogsqlVariable();
++    if (initialValue !== logsqlVarValueRef.current) {
++      syncLogsqlValue(initialValue);
++    }
++
++    const subscription = locationService.getLocationObservable().subscribe(() => {
++      const currentValue = readLogsqlVariable();
++      if (currentValue === logsqlVarValueRef.current) {
++        return;
++      }
++      syncLogsqlValue(currentValue);
++    });
++
++    return () => subscription.unsubscribe();
++  }, [loadLogsData, loadTimeSeriesData, logsqlVariable]);
++
++  useEffect(() => {
++    showJSLog('useEffect: []', 'orange');
++    setTestError('');
++    const readDatasourceVariable = () => {
++      try {
++        return (
++          locationService.getSearch().get('var-ds') ??
++          locationService.getSearch().get('var-datasource')
++        );
++      } catch (err) {
++        console.error('read datasource variable from url failed', err);
++        return null;
++      }
++    };
++
++    if (firstTimeLogsql.length === 0) {
++      firstTimeLogsql = getLogsqlFromURL();
++    }
++
++    const clearSelectOptions = (id: string) => {
++      const sel = document.getElementById(id) as HTMLSelectElement | null;
++      if (!sel) {
++        return;
++      }
++      while (sel.options.length > 0) {
++        sel.options.remove(sel.options.length - 1);
++      }
++    }
++
++    const resetFilters = () => {
++      streamFiltersRef.current = {};
++      fieldFiltersRef.current = {};
++      msgFiltersRef.current = {};
++      fulltextFiltersRef.current = {};
++      fieldsAfterStreamFilterRef.current = {};
++
++      const addedTd = document.getElementById('addedFieldFilters') as HTMLTableCellElement | null;
++      if (addedTd) {
++        addedTd.innerHTML = '';
++      }
++      const streamFilterTbody = document.getElementById('stream_filter_tbody') as HTMLTableSectionElement | null;
++      if (streamFilterTbody) {
++        streamFilterTbody.innerHTML = '';
++      }
++      setMessageValue('');
++      setFullTextSearch('');
++      setFullTextSearchOperator(null);
++      setFullTextSearchEnabled(false);
++      setMessageFilterEnabled(false);
++      // 字段选中框需要清空
++      clearSelectOptions('htmlSelectForFieldNames');
++      clearSelectOptions('selForFieldValues');
++      cleanTextBox("textboxForFieldNames");
++      cleanTextBox("textboxForFieldValues");
++      const selForFieldOperator = document.getElementById("selForFieldOperator") as HTMLSelectElement | null;
++      if (selForFieldOperator) {
++        selForFieldOperator.options.selectedIndex = 0;
++      }
++    };
++
++    const cleanTextBox = (id: string) => {
++      const textbox = document.getElementById(id) as HTMLInputElement | null;
++      if (!textbox) {
++        return;
++      }
++      textbox.value = "";
++    }
++
++    datasourceVarValueRef.current = readDatasourceVariable();
++    const subscription = locationService.getLocationObservable().subscribe(() => {
++      const currentValue = readDatasourceVariable();
++      if (currentValue === datasourceVarValueRef.current) {
++        return;
++      }
++
++      datasourceVarValueRef.current = currentValue;
++      setDatasourceUid(null);
++      setDatasourceId(null);
++      resetFilters();
++      loadPanelData();
++      generateLogsQL(false);
++      eventBus.publish({ type: PanelEvents.refresh.name } as any);
++    });
++    return () => subscription.unsubscribe();
++  }, []);
++
++  // useEffect(() => {
++  //   showJSLog('useEffect: [limitEnabled, limitValue]', 'green');
++  //   generateLogsQL(true);
++  // }, [limitEnabled, limitValue]);
++  useEffect(() => {
++    showJSLog('useEffect: [options?.jsonConfig]', 'green');
++    setJsonConfig(options?.jsonConfig ?? '');
++  }, [options?.jsonConfig]);
++  useEffect(() => {
++    showJSLog('useEffect: [jsonConfig]', 'green');
++    try {
++      jsonConfigRef.current = jsonConfig ? (JSON.parse(jsonConfig) as JsonConfigShape) : null;
++    } catch (err) {
++      jsonConfigRef.current = null;
++      console.error('jsonConfig parse error', err);
++    }
++  }, [jsonConfig]);
++
++  useEffect(() => {
++    showJSLog('useEffect: loadPanelData()', 'green');
++    loadPanelData();
++    createFixedFieldFilterFromConfig();
++  }, []);
++
++  // keep latest timeRange in ref without resetting UI state
++  useEffect(() => {
++    showJSLog('useEffect: [timeRange] xx', 'green');
++    timeRangeRef.current = timeRange;
++    //onTimeRangeChange(timeRange);
++    const logsql = document.getElementById('logsql') as HTMLTextAreaElement | null;
++    if (!logsql) {
++      showJSLog('not found', 'red');
++      return;
++    }
++    const s = logsql.value;
++    const re = /^\s*_time:\[[^\]]*\].*/g;
++    let nextLogsql = s;
++    if (re.test(s)) {
++      showJSLog('found 1', 'green');
++      const idx = s.indexOf(']');
++      if (idx != -1) {
++        showJSLog('found 2', 'green');
++        const sb = createStringBuilder();
++        const rawFrom = timeRangeRef.current?.raw?.from;
++        const rawTo = timeRangeRef.current?.raw?.to;
++        const startStr = typeof rawFrom === 'string' ? rawFrom : timeRangeRef.current?.from?.toISOString();
++        const endStr = typeof rawTo === 'string' ? rawTo : timeRangeRef.current?.to?.toISOString();
++        if (startStr && endStr) {
++          sb.append('_time:[');
++          sb.append(startStr);
++          sb.append(', ');
++          sb.append(endStr);
++          sb.append(']');
++        }
++        nextLogsql = sb.toString() + s.substring(idx + 1);
++        logsql.value = nextLogsql;
++        const varName: Record<string, any> = {};
++        let varKey = `var-${logsqlVariable}`;
++        if (logsqlVariable.startsWith('$')) {
++          varKey = `var-` + logsqlVariable.substring(1);
++        }
++        varName[varKey] = nextLogsql;
++        locationService.partial(varName, true);
++      }
++    } else {
++      showJSLog(s, 'blue');
++      generateLogsQL(true);
++      nextLogsql = logsql.value;
++    }
++    if (nextLogsql === logsqlVarValueRef.current) {
++      void loadLogsData(nextLogsql);
++      void loadTimeSeriesData();
++    }
++    //const startsWithTime = /^_time:/.test(s);
++    //showJSLog(`logsql starts with _time:: ${startsWithTime}`, startsWithTime ? 'green' : 'red');
++  }, [loadLogsData, loadTimeSeriesData, logsqlVariable, timeRange]);
++
++  // 根据配置，创建固定的某个字段的过滤器 UI
++  const createFixedFieldFilterFromConfig = () => {
++    const addedTd = document.getElementById('addedFixedFieldFilters') as HTMLTableCellElement | null;
++    if (!addedTd) {
++      return;
++    }
++
++    const fixed_field_filter = jsonConfigRef.current?.fixed_field_filter ?? [];
++    fixed_field_filter.forEach((item) => {
++      let operator: string = '';
++      let operatorText: string = '';
++      switch (item.operator) {
++        case nameOfOperatorEqual:
++          operator = defaultFieldOperatorOptions[0].value;
++          operatorText = defaultFieldOperatorOptions[0].label;
++          break;
++        default:
++          alert("not supported operator:" + item.field + " " + item.operator);
++          return;
++      }
++      const div = document.createElement('div');
++      const span = document.createElement('span');
++      let text = item?.text ?? "";
++      if (text.length === 0) {
++        text = (item?.field ?? '') + ': ';
++      }
++      span.textContent = text;
++      span.style.display = 'inline-block';
++      span.style.maxWidth = '250px';
++      span.style.width = '250px';
++      span.style.overflow = 'hidden';
++      span.style.textOverflow = 'ellipsis';
++      span.style.whiteSpace = 'nowrap';
++      span.style.textAlign = 'right';
++      span.style.paddingRight = '3px';
++      div.appendChild(span);
++      const input = document.createElement('input');
++      input.type = 'text';
++      input.style.width = '180px';
++      input.addEventListener('blur', (e) => {
++        const val = (e.currentTarget as HTMLInputElement).value;
++        createOrUpdateFieldFilterData(item.field, operator, operatorText, val);
++      });
++      div.appendChild(input);
++      addedTd.appendChild(div);
++    });
++  };
++
++  // 增加额外的过滤字段
++  const addExtraStreamFieldFilter = (streamFilters: Record<string, Filter>): string[] => {
++    let sb: string[] = [];
++    // 检查是否有额外的 stream filter 配置
++    if ((jsonConfigRef.current?.extra_stream_filter?.length ?? 0) === 0) {
++      return sb;
++    }
++    const extra_stream_filter = jsonConfigRef.current?.extra_stream_filter;
++    //let isAddComma = Object.keys(streamFilters).length > 0;
++    let isFirst = true;
++    extra_stream_filter?.forEach((item) => {
++      const joinField = item?.if_exists?.field ?? "";
++      if (!(joinField in fieldFiltersRef.current)) {  // 当前的 field 的过滤器中存在，命中
++        return;
++      }
++      const fieldFilter = fieldFiltersRef.current[joinField];
++      const fieldOperator = item?.if_exists?.operator ?? "";
++      switch (fieldOperator) {
++        case nameOfOperatorEqual:
++          if (fieldFilter.operator !== defaultFieldOperatorOptions[0].value) {
++            return;
++          }
++          break;
++        default:
++          alert("json config error, not supported operator:" + fieldOperator);
++          return;
++      }
++      // 执行正则表达式
++      const re = new RegExp(item?.value?.regexp ?? "");
++      const m = re.exec(fieldFilter.value);
++      if (!m) {
++        alert("regexp execute error:" + (item?.value?.regexp ?? ""));
++        return;
++      }
++      const result = m?.groups?.[item?.value?.group_name ?? ""] ?? "";
++      if (result.length === 0) {
++        return;
++      }
++      // 输出额外的 stream filter
++      if (Object.keys(streamFilters).length > 0 && isFirst) {
++        sb.push(', ');
++        isFirst = false;
++      } else {
++        if (isFirst) {
++          isFirst = false;
++        } else {
++          sb.push(', ');
++        }
++      }
++      sb.push(JSON.stringify(item?.name));
++      const targetOperator = item?.operator ?? "";
++      switch (targetOperator) {
++        case nameOfOperatorEqual:
++          sb.push('=');
++          break;
++        default:
++          alert("json config error, not supported target operator:" + targetOperator);
++          return;
++      }
++      sb.push(JSON.stringify(result));
++    })
++    return sb;
++  }
++
++  const defaultLimitValue = 100;
++
++  // 根据几个全局的 map, 生成 logsQL 语句
++  const generateLogsQL = (
++    force: boolean,
++    removeFieldsOverride?: { enabled?: boolean; text?: string },
++    globalSortOverride?: { enabled?: boolean; field?: string; desc?: boolean }
++  ) => {
++    const logsql = document.getElementById('logsql') as HTMLTextAreaElement | null;
++    if (!logsql) {
++      return;
++    }
++    //
++    const streamFilters = streamFiltersRef.current;
++    const fieldFilters = fieldFiltersRef.current;
++    if (!force) {
++      const logsqlFromURL = getLogsqlFromURL();
++      if (logsqlFromURL.length > 0 &&
++        logsqlFromURL === firstTimeLogsql &&
++        Object.keys(streamFilters).length === 0 &&
++        Object.keys(fieldFilters).length === 0) {
++        //hasLogsqlAtUrl = false;
++        //logsql.value = "";
++        //setTestError('not generate logsql');
++        showJSLog('not generate logsql', 'green');
++        logsql.value = logsqlFromURL;
++        return;
++      }
++    }
++    //showJSLog('ready to generate logsql:' + hasLogsqlAtUrl.toString(), 'green');
++    //
++    const sb = createStringBuilder();
++    const rawFrom = timeRangeRef.current?.raw?.from;
++    const rawTo = timeRangeRef.current?.raw?.to;
++    const startStr = typeof rawFrom === 'string' ? rawFrom : timeRangeRef.current?.from?.toISOString();
++    const endStr = typeof rawTo === 'string' ? rawTo : timeRangeRef.current?.to?.toISOString();
++    if (startStr && endStr) {
++      sb.append('_time:[');
++      sb.append(startStr);
++      sb.append(', ');
++      sb.append(endStr);
++      sb.append('] ');
++    }
++
++
++    if (Object.keys(streamFilters).length > 0) {
++      sb.append('{');
++      let isFirst = true;
++      for (const k in streamFilters) {
++        if (isFirst) {
++          isFirst = false;
++        } else {
++          sb.append(',');
++        }
++        sb.append(JSON.stringify(k));
++        sb.append(streamFilters[k].operator);
++        sb.append(JSON.stringify(streamFilters[k].value ?? ''));
++      }
++      const temp = addExtraStreamFieldFilter(streamFilters);
++      if (temp.length > 0) {
++        for (const index in temp) {
++          sb.append(temp[index]);
++        }
++      }
++      sb.append('} ');
++    } else {
++      const temp = addExtraStreamFieldFilter(streamFilters);
++      if (temp.length > 0) {
++        sb.append('{');
++        for (const index in temp) {
++          sb.append(temp[index]);
++        }
++        sb.append('} ');
++      }
++    }
++    //
++    for (const k in fieldFilters) {
++      sb.append(JSON.stringify(k));
++      const op = fieldFilters[k]?.operator ?? '';
++      const val = fieldFilters[k]?.value ?? '';
++      if (op.includes('xxx')) {
++        sb.append(`${op.replace('xxx', JSON.stringify(val ?? ''))}`);
++      } else {
++        sb.append(op);
++        sb.append(JSON.stringify(val ?? ''));
++      }
++      sb.append(' ');
++    }
++    //
++    if ('_msg' in msgFiltersRef.current) {
++      const v = msgFiltersRef.current['_msg'];
++      if (v.operator.length > 0 && v.value.length > 0) {
++        sb.append('_msg');
++        switch (v.operator) {
++          case ':~':
++          case ':!~':
++            sb.append(v.operator);
++            sb.append(JSON.stringify(v.value ?? ''));
++            break;
++          case ':xxx*':
++            sb.append(':')
++            sb.append(JSON.stringify(v.value ?? ''));
++            sb.append('*')
++            break;
++          case ':*xxx*':
++            sb.append(':*')
++            sb.append(JSON.stringify(v.value ?? ''));
++            sb.append('*')
++            break;
++          default:
++            alert('not support operator:' + v.operator);
++            break;
++        }
++        sb.append(' ');
++      }
++    }
++    //
++    if ('fulltext' in fulltextFiltersRef.current) {
++      const ft = fulltextFiltersRef.current['fulltext'];
++      if (ft.operator.length > 0 && ft.value.length > 0) {
++        let expr = '';
++        if (ft.operator.includes('xxx')) {
++          expr = ft.operator.replace(/xxx/g, JSON.stringify(ft.value ?? ''));
++        } else {
++          expr = `${ft.operator}${ft.value}`;
++        }
++        sb.append(expr);
++        sb.append(' ');
++      }
++    }
++    if (
++      Object.keys(streamFilters).length === 0 &&
++      Object.keys(fieldFilters).length === 0 &&
++      Object.keys(msgFiltersRef.current).length === 0 &&
++      Object.keys(fulltextFiltersRef.current).length === 0
++    ) {
++      sb.append('* ');
++    }
++    // 输出字段
++    const isAllField = getOutputFieldChooseMode();
++    const txtFieldsList = document.getElementById('txtOutputFieldsList') as HTMLTextAreaElement | null;
++    if (!isAllField && txtFieldsList && txtFieldsList.value.length > 0) {
++      sb.append('| fields ')
++      sb.append(tidyOutputFields(txtFieldsList.value).join(', '));
++      sb.append(' ')
++    }
++    const removeEnabled = removeFieldsOverride?.enabled ?? removeFieldsEnabled;
++    const removeText = removeFieldsOverride?.text ?? removeFieldsText;
++    if (removeEnabled) {
++      const fields = parseRemoveFieldsText(removeText);
++      if (fields.length > 0) {
++        sb.append('| delete ');
++        sb.append(fields.join(', '));
++        sb.append(' ');
++      }
++    }
++    const sortEnabled = globalSortOverride?.enabled ?? useGlobalSort;
++    const sortField = globalSortOverride?.field ?? globalSortField;
++    const sortDesc = globalSortOverride?.desc ?? globalSortDesc;
++    if (sortEnabled) {
++      const field = sortField.trim();
++      if (field.length > 0) {
++        sb.append('| sort by (');
++        sb.append(field);
++        sb.append(')');
++        if (sortDesc) {
++          sb.append(' desc');
++        }
++        sb.append(' ');
++      }
++    }
++    // limit 配置
++    var checkbox = document.getElementById('checkboxForLimit') as HTMLInputElement | null;
++    if (limitEnabled && checkbox?.checked) {
++      var textbox = document.getElementById('textboxForLimit') as HTMLInputElement | null;
++      let limitValue1 = textbox?.value ?? limitValue;
++      const num = Number(limitValue1);
++      const safeLimit = Number.isFinite(num) && num > 0 ? num : defaultLimitValue;
++      sb.append('| limit ');
++      sb.append(String(safeLimit));
++      sb.append(' ');
++      //showJSLog('append limit:' + safeLimit.toString() + ', limitValue=' + limitValue, 'blue');
++    }
++    logsql.value = sb.toString();
++    //showJSLog('generate logsql:' + logsql.value + ' ' + hasLogsqlAtUrl.toString(), 'orange');
++    // 因为这个时候右上角的 query 按钮没有联动。所以此时要写入 var-logsql 到 URL 中
++    const varName: Record<string, any> = {};
++    let varKey = `var-${logsqlVariable}`;
++    if (logsqlVariable.startsWith('$')) {
++      varKey = `var-` + logsqlVariable.substring(1);
++    }
++    varName[varKey] = logsql.value;
++    locationService.partial(varName, true);
++    //hasLogsqlAtUrl = false;
++  };
++
++  const getFieldsByStreamFields = (streamField?: string, operator?: string, value?: string | null) => {
++    const m = streamFiltersRef.current;
++    if (m && streamField) {
++      // 记录下修改后的 stream filter
++      m[streamField] = { operator: operator ?? '', value: value ?? '' };
++      generateLogsQL(false);
++      loadFieldNamesByStreamFields();
++    }
++  };
++
++  // 猜测是定义了一个控件
++  const ValueSelect: React.FC<{
++    options: Option[];
++    operator?: string;
++    streamField?: string;
++    selectId: string;
++    placeholder?: string;
++    onInput?: (val: string | undefined | null) => void | Promise<void>;
++  }> = ({ options, operator, streamField, selectId, placeholder, onInput }) => {
++    const [localOptions, setLocalOptions] = useState<Option[]>(options);
++    useEffect(() => {
++      setLocalOptions(options);
++    }, [options]);
++
++    return (
++      <Select
++        width={40}
++        allowCustomValue
++        inputId={selectId}
++        name={selectId}
++        placeholder={placeholder ?? 'type or select'}
++        options={localOptions}
++        onChange={(v) => {
++          getFieldsByStreamFields(streamField, operator, v.value);
++        }}
++        onInputChange={(inputValue, actionMeta: any) => {
++          if (actionMeta?.action === 'input-change') {
++            onInput?.(inputValue);
++          }
++        }}
++      />
++    );
++  };
++
++  // 选择的时间范围变更的时候，响应这个事件
++  // const onTimeRangeChange = (tr?: TimeRange) => {
++  //   generateLogsQL(true);
++  // };
++
++  const loadFieldValues = async (fieldName: string, match: string): Promise<string[]> => {
++    const uid = await resolveDatasourceUid();
++    if (!uid) {
++      console.error('field_values: datasource uid not found');
++      return [];
++    }
++    let postData = {
++      query: '*',
++      start: getStartRange(),
++      end: 'now',
++      limit: `${defaultRecordCount}`,
++      field: fieldName,
++    };
++    if (match && match.length > 0) {
++      postData.query = `${fieldName}:*${JSON.stringify(match)}*`;
++    }
++    try {
++      const resp = await getBackendSrv().post(
++        `/api/datasources/uid/${uid}/resources/select/logsql/field_values`,
++        postData
++      );
++      if (Array.isArray(resp?.values)) {
++        return resp.values.filter(
++          (item: any) => item?.value !== null && item?.value !== undefined && String(item?.value).length > 0
++        ).map((item: any) => item?.value);
++      }
++      return [];
++    } catch (err: any) {
++      setTestError(err?.statusText ?? '');
++      return [];
++    }
++  }
++
++  const createOrUpdateFieldFilterData = (fieldName: string,
++    operator: string, operatorText: string, value: string) => {
++    if (fieldName in fieldFiltersRef.current) {
++      // 存在上次结果的基础上，应该删除 dom 中的 div 行
++      const addedTd = document.getElementById('addedFieldFilters') as HTMLTableCellElement | null;
++      if (addedTd) {
++        Array.from(addedTd.children).forEach((child) => {
++          const text = child.textContent ?? '';
++          if (text.includes(fieldName)) {
++            child.remove();
++          }
++        });
++      }
++    }
++    if (value.length > 0) {
++      fieldFiltersRef.current[fieldName] = { operator: operator, value: value };
++
++      const addedTd = document.getElementById('addedFieldFilters') as HTMLTableCellElement | null;
++      if (addedTd) {
++        const div = document.createElement('div');
++        const textSpan = document.createElement('span');
++        textSpan.textContent = `${fieldName} ${operatorText} ${value} `;
++        const removeBtn = document.createElement('button');
++        removeBtn.type = 'button';
++        removeBtn.textContent = '❌';
++        removeBtn.style.border = 'none';
++        removeBtn.addEventListener('click', () => onRemoveFieldFilterClick(div, fieldName));
++        div.appendChild(textSpan);
++        div.appendChild(removeBtn);
++        addedTd.appendChild(div);
++      }
++    } else {
++      delete fieldFiltersRef.current[fieldName];
++    }
++    generateLogsQL(false);
++  }
++
++  const addFieldFilter = () => {
++    const fieldNameInput = document.getElementById('textboxForFieldNames') as HTMLInputElement | null;
++    if (!fieldNameInput) {
++      return;
++    }
++    const fieldName = fieldNameInput.value.trim();
++    if (fieldName.length === 0) {
++      return;
++    }
++    const selForOperator = document.getElementById('selForFieldOperator') as HTMLSelectElement | null;
++    if (!selForOperator) {
++      return;
++    }
++    if (selForOperator.selectedIndex < 0) {
++      return;
++    }
++    const operator = selForOperator.value;
++    const operatorText = selForOperator.options.item(selForOperator.options.selectedIndex)?.text ?? '';
++    const textboxForFieldValue = document.getElementById('textboxForFieldValues') as HTMLInputElement | null;
++    if (!textboxForFieldValue) {
++      return;
++    }
++    const fieldValue = textboxForFieldValue.value.trim();
++    if (fieldValue.length === 0) {
++      return;
++    }
++    createOrUpdateFieldFilterData(fieldName, operator, operatorText, fieldValue);
++  };
++
++  const fullTextSearchOptions: Option[] = [
++    { label: '(word/phrase)', value: 'xxx' },
++    { label: '= (equal)', value: '=xxx' },
++    { label: '~ (regexp match)', value: '~xxx' },
++    { label: '!~ (not match)', value: '!~xxx' },
++    { label: 'xx* (prefix)', value: 'xxx*' },
++    { label: '*xx* (substring)', value: '*xxx*' },
++  ];
++
++  const onRemoveFieldFilterClick = (wrapper: HTMLElement, fieldKey: string) => {
++    wrapper.remove();
++    delete fieldFiltersRef.current[fieldKey];
++    generateLogsQL(false);
++  };
++
++  const onFilterByStreamFieldsChange = (event: React.ChangeEvent<HTMLInputElement>) => {
++    setFilterByStreamFields(event.currentTarget.checked);
++    loadFieldNamesByStreamFields();
++  };
++
++  const onFieldOperatorChange = (value?: string | null) => {
++    if (!messageFilterEnabled) {
++      return;
++    }
++    const op = value ?? '';
++    const m = msgFiltersRef.current;
++    if ('_msg' in m) {
++      m['_msg'].operator = op;
++    } else {
++      m['_msg'] = { operator: op, value: '' };
++    }
++    generateLogsQL(false);
++  };
++
++  const onFieldValueBlur = (val: string) => {
++    //showJSLog('onFieldValueBlur', 'red');
++    if (!messageFilterEnabled) {
++      return;
++    }
++    const m = msgFiltersRef.current;
++    if ('_msg' in m) {
++      m['_msg'].value = val ?? '';
++    } else {
++      m['_msg'] = { operator: ':~', value: val ?? '' };
++    }
++    generateLogsQL(true);
++  };
++
++  const onLogsqlCopy = () => {
++    const textarea = document.getElementById('logsql') as HTMLTextAreaElement | null;
++    if (textarea) {
++      textarea.select();
++      document.execCommand('copy');
++    }
++  };
++
++  // 点击测试按钮
++  const onLogsqlTest = () => {
++    const logsqlEl = document.getElementById('logsql') as HTMLTextAreaElement | null;
++    const startTs = timeRangeRef.current?.from?.valueOf();
++    const endTs = timeRangeRef.current?.to?.valueOf();
++    const query = logsqlEl?.value ?? '';
++
++    if (!startTs || !endTs || !query || !datasourceUid) {
++      setTestResult('Missing time range, query, or datasource UID');
++      setTestError('');
++      return;
++    }
++    setTestResult('Testing LogsQL...');
++    setTestError('');
++
++    const body = {
++      queries: [
++        {
++          datasource: { type: 'victoriametrics-logs-datasource', uid: datasourceUid },
++          expr: query,
++          queryType: 'hits',
++          maxLines: 100,
++          step: '1d',
++        },
++      ],
++      from: String(startTs), // 单位确实是毫秒
++      to: String(endTs),
++    };
++
++    getBackendSrv()
++      .post(`/api/ds/query?ds_type=victoriametrics-logs-datasource&requestId=logsql_test`, body)
++      .then((resp) => {
++        const status = resp?.results?.A?.status ?? 200;
++        switch (status) {
++          case 200:
++            {
++              // 显示 hits 结果的第一条记录的时间和值
++              const frames = resp?.results?.A?.frames;
++              let formatted = '';
++              if (Array.isArray(frames) && frames.length > 0) {
++                const values = frames[0]?.data?.values;
++                if (
++                  Array.isArray(values) &&
++                  Array.isArray(values[0]) &&
++                  Array.isArray(values[1]) &&
++                  values[0].length > 0 &&
++                  values[1].length > 0
++                ) {
++                  const ts = Number(values[0][0]);
++                  const val = values[1][0];
++                  const pad = (n: number) => String(n).padStart(2, '0');
++                  if (Number.isFinite(ts)) {
++                    const d = new Date(ts);
++                    formatted = ` * ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
++                      d.getHours()
++                    )}:${pad(d.getMinutes())}:${pad(d.getSeconds())} hits=${String(val)}`;
++                  }
++                }
++              }
++              setTestResult('LogsQL test success:' + formatted);
++              setTestError('');
++            }
++            break;
++          default:
++            setTestResult(String(status));
++            setTestError(resp?.results?.A?.error ?? '');
++            break;
++        }
++      })
++      .catch((err: any) => {
++        setTestResult(err?.statusText ?? '');
++        setTestError(err?.data?.results?.A?.error ?? '');
++      });
++  };
++
++  const onLogsqlReset = () => {
++    const params: Record<string, string | null> = { 'var-step': null };
++    let varKey = `var-${logsqlVariable}`;
++    if (logsqlVariable.startsWith('$')) {
++      varKey = `var-` + logsqlVariable.substring(1);
++    }
++    params[varKey] = null;
++    try {
++      locationService.partial(params, true);
++    } catch (err) {
++      console.error('reset url variables failed', err);
++    }
++    window.location.reload();
++  };
++
++  // 当输入正则表达式变化时
++  const onStreamFieldValueBlur = async (streamField: string, operator: string, val: string) => {
++    const m = streamFiltersRef.current;
++    if (streamField) {
++      m[streamField] = { operator: operator ?? '', value: val ?? '' };
++      generateLogsQL(true);
++      await loadFieldNamesByStreamFields();
++    }
++  };
++
++  // stream filter 变更后，加载 field names
++  const loadFieldNamesByStreamFields = async () => {
++    const chkUseStreamFilter = document.getElementById('chkUseStreamFilter') as HTMLInputElement | null;
++    const useStreamFilter = chkUseStreamFilter?.checked ?? false;
++    if (!useStreamFilter) {
++      // fieldMapRef 是第一次加载的 field 列表
++      const opts: Option[] = Object.keys(fieldMapRef.current)
++        .sort()
++        .map((k: string) => ({ label: k, value: k }));
++      setSelectOptions("htmlSelectForFieldNames", opts);
++      return;
++    }
++    loadFieldNamesDynamic();
++  };
++
++  const renderValueSelectForWrapper = (
++    wrapper: HTMLElement,
++    opts: Option[],
++    operator?: string,
++    streamField?: string,
++    placeholder?: string
++  ) => {
++    const selectId = streamField ? `stream-value-${streamField}` : 'stream-value-select';
++    let root = valueSelectRoots.get(wrapper);
++    if (!root) {
++      root = createRoot(wrapper);
++      valueSelectRoots.set(wrapper, root);
++    }
++    // stream field value 的选择控件
++    root.render(
++      <ValueSelect
++        options={opts}
++        operator={operator}
++        streamField={streamField}
++        selectId={selectId}
++        placeholder={placeholder}
++        onInput={(inputValue) => streamFieldOnValueInputChange(wrapper, inputValue, operator, streamField)}
++      />
++    );
++  };
++
++  // 选择了 stream field 的 value 后: 同时还要触发 fields 的列表更新
++  const streamFieldOnValueInputChange = async (
++    source: HTMLElement | null,
++    val: string | undefined | null,
++    operator?: string,
++    streamField?: string
++  ) => {
++    if (!streamField) {
++      return;
++    }
++
++    const uid = await resolveDatasourceUid();
++    if (!uid) {
++      console.error('stream_field_names: datasource uid not found for input change');
++      return;
++    }
++
++    const path = `/api/datasources/uid/${uid}/resources/select/logsql/stream_field_values`;
++    const payload = {
++      field: streamField,
++      query: `${streamField}:~\".*${val}.*\"`,
++      limit: `${defaultRecordCount}`,
++      start: getStartRange(),
++      end: 'now',
++    };
++
++    try {
++      const resp = await getBackendSrv().post(path, payload);
++      if (source && source instanceof HTMLElement) {
++        const options =
++          Array.isArray(resp?.values) && resp.values.length
++            ? resp.values.map((item: any) => ({
++              label: '(' + String(item.hits) + ')' + item?.value,
++              value: item?.value,
++            }))
++            : [];
++        renderValueSelectForWrapper(source, options, operator, streamField);
++      }
++
++      console.log('stream_field_values input from', source, resp);
++    } catch (err) {
++      console.error('stream_field_names input change error', err);
++    }
++  };
++
++  // 选择 stream field 的 operator 变更事件
++  const on_operator_change = async (selectEl: HTMLSelectElement, valueCell?: HTMLElement | null) => {
++    const value = selectEl.value;
++    console.log('onchange select', value);
++    let jsonData: any;
++    try {
++      jsonData = JSON.parse(value);
++    } catch {
++      return;
++    }
++
++    const operator = jsonData?.operator;
++    const streamField = jsonData?.stream_field ?? jsonData?.stream_feild;
++
++    const targetCell = valueCell ?? (selectEl.parentElement?.nextElementSibling as HTMLElement | null);
++    if (!targetCell) {
++      return;
++    }
++
++    switch (operator) {
++      case '':
++        while (targetCell.firstChild) {
++          targetCell.removeChild(targetCell.firstChild);
++        }
++        if (streamField) {
++          delete streamFiltersRef.current[streamField];
++        }
++        generateLogsQL(true);  // 去掉字段，强制更新 logsql
++        break;
++      case '=':
++      case '!=':
++        if (!streamField) {
++          return;
++        }
++        await showStreamFieldValueSelector(targetCell, operator, streamField, jsonData?.index);
++        break;
++      case '=~':
++      case '!~':
++        while (targetCell.firstChild) {
++          targetCell.removeChild(targetCell.firstChild);
++        }
++        {
++          const root = createRoot(targetCell);
++          root.render(
++            <input
++              type="text"
++              style={{ width: '400px', height: '32px', padding: '4px 8px' }}
++              placeholder="enter value"
++              onBlur={(e) => {
++                onStreamFieldValueBlur(streamField, operator, e.currentTarget.value);
++              }}
++            />
++          );
++        }
++        break;
++      default:
++        alert('not support operator:' + operator);
++        break;
++    }
++    loadFieldNamesByStreamFields();
++  };
++
++  // 操作符变更的时候，动态拉取 stream field 的 value
++  const showStreamFieldValueSelector = async (
++    targetCell: HTMLElement,
++    operator: string,
++    streamField: string,
++    index: number
++  ) => {
++    while (targetCell.firstChild) {
++      targetCell.removeChild(targetCell.firstChild);
++    }
++
++    const wrapper = document.createElement('div');
++    wrapper.dataset.streamValueSelect = 'true';
++    targetCell.appendChild(wrapper);
++
++    renderValueSelectForWrapper(wrapper, [], operator, streamField, 'loading...');
++
++    const uid = await resolveDatasourceUid();
++    if (!uid) {
++      console.error('stream_field_values: datasource uid not found');
++      return;
++    }
++    let queryStr = '*';
++    if (cascadeFiltering) {
++      if (index > 0 && index < Object.keys(streamFieldIndexMapRef.current).length) {
++        const sb = createStringBuilder();
++        const streamFilters = streamFiltersRef.current;
++        for (let idx = 0; idx < index; idx++) {
++          const streamFieldName = streamFieldIndexMapRef.current[idx];
++          if (!(streamFieldName in streamFilters)) {
++            // 上一级字段根本没选，跳过
++            continue;
++          }
++          const filter = streamFilters[streamFieldName];
++          sb.append(JSON.stringify(streamFieldName));
++          switch (filter.operator) {
++            case '=':
++              sb.append(':=');
++              break;
++            case '!=':
++              sb.append(':!');
++              break;
++            case '=~':
++              sb.append(':~');
++              break;
++            case '!~':
++              sb.append(':!~');
++              break;
++            default:
++              alert('bad operator:' + filter.operator);
++              break;
++          }
++          sb.append(JSON.stringify(filter.value));
++          sb.append(' ');
++        }
++        queryStr = sb.toString();
++      }
++    }
++    if (queryStr.trim() === '') {
++      queryStr = '*';
++    }
++    const resp = await getBackendSrv().post(`/api/datasources/uid/${uid}/resources/select/logsql/stream_field_values`, {
++      field: streamField,
++      query: queryStr,
++      start: getStartRange(),
++      end: 'now',
++      limit: `${defaultRecordCount}`,
++    });
++    const options =
++      Array.isArray(resp?.values) && resp.values.length
++        ? resp.values.map((item: any) => ({ label: item?.value ?? '', value: item?.value ?? '' }))
++        : [];
++    renderValueSelectForWrapper(wrapper, options, operator, streamField);
++  };
++
++  const each_stream_feild = (stream_field_name: string, hits: number, index: number) => {
++    console.log('each_stream_feild', stream_field_name, hits);
++    const tbody = document.getElementById('stream_filter_tbody') as HTMLTableSectionElement | null;
++    if (!tbody) {
++      return;
++    }
++    const tr = document.createElement('tr');
++
++    const nameTd = document.createElement('td');
++    const nameWidth = 250;
++    nameTd.style.width = `${nameWidth}px`;
++    nameTd.innerHTML = `
++      <span style="display:inline-block;max-width:${nameWidth}px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:${nameWidth}px;text-align:right;padding-right:3px;" title="hits:${hits}">
++        ${stream_field_name ?? ''}:
++      </span>`;
++
++    const operatorTd = document.createElement('td');
++    const valueTd = document.createElement('td');
++    const select = document.createElement('select');
++    select.style.height = '32px';
++    select.style.width = '180px';
++    select.style.padding = '4px 8px';
++    select.style.marginRight = '8px';
++    [
++      { value: '', label: 'empty' },
++      { value: '=', label: '= (equal)' },
++      { value: '!=', label: '!= (not equal)' },
++      { value: '=~', label: '=~ (regexp match)' },
++      { value: '!~', label: '!~ (not match)' },
++    ].forEach((opt) => {
++      const optionEl = document.createElement('option');
++      optionEl.value = JSON.stringify({ stream_feild: stream_field_name, operator: opt.value, index: index });
++      optionEl.text = opt.label;
++      select.appendChild(optionEl);
++    });
++    select.addEventListener('change', () => on_operator_change(select, valueTd));
++    operatorTd.appendChild(select);
++
++    tr.appendChild(nameTd);
++    tr.appendChild(operatorTd);
++    tr.appendChild(valueTd);
++    tbody.appendChild(tr);
++  };
++
++  // 得到了 stream_field_names
++  const on_stream_field_names_response = (resp: any) => {
++    const tbody = document.getElementById('stream_filter_tbody');
++    if (!tbody) {
++      console.log('not found stream_filter_tbody');
++      return;
++    }
++    tbody.innerHTML = '';
++    if (!Array.isArray(resp?.values)) {
++      alert('not an array');
++      return;
++    }
++    if (resp.values.length === 0) {
++      setTestError('The stream fields returned empty. Please select a larger time range and then refresh the entire page.');
++    }
++    const values = [...resp.values].sort((a: any, b: any) => {
++      const ka = String(a?.value ?? '');
++      const kb = String(b?.value ?? '');
++      return ka.localeCompare(kb);
++    });
++    let m: Record<string, number> = {};
++    for (let index in resp.values) {
++      const item = resp.values[index];
++      m[item.value] = item.hits;
++    }
++    //
++    const streamFieldList = options.streamFieldList ?? '';
++    const shouldAutofill = streamFieldList.trim() === '';
++    let configedStreamFields: string[] = [];
++    if (!shouldAutofill) {
++      const arr = streamFieldList.split(',');
++      for (let index = 0; index < arr.length; index++) {
++        const item = arr[index].trim();
++        if (item !== '') {
++          // 检查是否存在于当前查询得到的列表中
++          if (!(item in m)) {
++            configedStreamFields = [];
++            setTestError('WARN: json config error: stream field "' + item + '" not found in datasource. Ignore json config stream field list.');
++            break;
++          }
++          configedStreamFields.push(item);
++        }
++      }
++    }
++    // 当配置中有字段列表的时候，需要检查字段列表是否是当前查询得到的列表的子集。否则配置不生效
++    if (configedStreamFields.length === 0) {
++      for (let index = 0; index < values.length; index++) {
++        const item = values[index];
++        streamFieldIndexMapRef.current[index] = item?.value;
++        each_stream_feild(item?.value, item?.hits, index);
++      }
++    } else {
++      // 根据配置中的顺序来填充 stream field
++      for (let index = 0; index < configedStreamFields.length; index++) {
++        const item = configedStreamFields[index];
++        streamFieldIndexMapRef.current[index] = item;
++        each_stream_feild(item, m[item], index);
++      }
++    }
++  };
++
++  const onClickQueryButton = () => {
++    const logsqlEl = document.getElementById('logsql') as HTMLTextAreaElement | null;
++    const logsql = logsqlEl?.value ?? '';
++    console.info('onClickQueryButton', logsql);
++    if (!logsqlEl) {
++      setTestError('logsql element not found');
++      return;
++    }
++    if (!logsql) {
++      setTestError('logsql is empty');
++      return;
++    }
++    setLogsqlValue(logsql);
++    const varName: Record<string, any> = {};
++    // 根据配置中的变量名来输出
++    let varKey = `var-${logsqlVariable}`;
++    if (logsqlVariable.startsWith('$')) {
++      varKey = `var-` + logsqlVariable.substring(1);
++    }
++    varName[varKey] = logsql;
++    locationService.partial(varName, true);
++    setTestResult('Query applied and dashboard refresh triggered');
++    if (logsqlVarValueRef.current === logsql) {
++      void loadTimeSeriesData();
++      void loadLogsData(logsql);
++    }
++  };
++
++  const getStartRange = () => {
++    const from = timeRangeRef.current?.from?.valueOf();
++    if (!Number.isFinite(from)) {
++      return '1d';
++    }
++
++    const startDate = new Date(from as number);
++    startDate.setHours(0, 0, 0, 0);
++    const startOfToday = new Date();
++    startOfToday.setHours(0, 0, 0, 0);
++    const msPerDay = 24 * 60 * 60 * 1000;
++    const diffDays = Math.round((startOfToday.getTime() - startDate.getTime()) / msPerDay);
++    const days = diffDays + 1; // today => 1d, yesterday => 2d, etc.
++    return `${Math.max(days, 1)}d`;
++  };
++
++  const getLogsqlFromURL = (): string => {
++    // 如果 url 中有 var-logsql，则加到到 logsql 文本框中
++    let varKey = `var-${logsqlVariable}`;
++    if (logsqlVariable.startsWith('$')) {
++      varKey = `var-` + logsqlVariable.substring(1);
++    }
++    try {
++      const logsqlFromUrl = locationService.getSearch().get(varKey);
++      return (logsqlFromUrl && logsqlFromUrl.trim().length > 0) ? logsqlFromUrl.trim() : '';
++      // hasLogsqlAtUrl = true;
++      // const logsqlEl = document.getElementById('logsql') as HTMLTextAreaElement | null;
++      // if (logsqlEl) {
++      //   //setTestError(logsqlFromUrl);
++      //   //setTestResult(logsqlFromUrl);
++      //   showJSLog('logsql from url:' + logsqlFromUrl, 'green');
++      //   logsqlEl.value = logsqlFromUrl;
++      // }
++      //}
++    } catch (err) {
++      console.error('read logsql from url failed', err);
++      return '';
++    }
++  }
++
++  // panel 加载的时候，填充各种数据
++  const loadPanelData = async () => {
++    const uid = await resolveDatasourceUid();
++
++    if (!uid) {
++      console.error('stream_field_names: datasource uid not found');
++      return;
++    }
++    // 设置 field 的 operator 选项
++    setSelectOptions("selForFieldOperator", defaultFieldOperatorOptions);
++    const selForFieldOperator = document.getElementById('selForFieldOperator') as HTMLSelectElement | null;
++    if (selForFieldOperator) {
++      selForFieldOperator.options.selectedIndex = 0;
++    }
++
++    // 开始加载 stream field names
++    const path = `/api/datasources/uid/${uid}/resources/select/logsql/stream_field_names`;
++    const payload = {
++      query: '*',
++      start: getStartRange(),
++      end: 'now',
++      limit: `${defaultRecordCount}`,
++    };
++
++    try {
++      const streamFields = await getBackendSrv().post(path, payload);
++      console.log('stream_field_names', streamFields);
++      on_stream_field_names_response(streamFields);
++
++      // 加载所有的 field names
++      const fieldNames = await getBackendSrv().post(`/api/datasources/uid/${uid}/resources/select/logsql/field_names`, {
++        query: '*',
++        start: getStartRange(),
++        end: 'now',
++        limit: `${defaultRecordCount}`,
++      });
++      handleFieldNamesResponse(streamFields, fieldNames);
++    } catch (err) {
++      console.error('stream_field_names error', err);
++    }
++  };
++
++  // 第一次加载 field names
++  // @param resp 所有的 field names
++  const handleFieldNamesResponse = (streamFields: any, resp: any) => {
++    const streamFieldMap: Record<string, null> = {};
++    if (Array.isArray(streamFields?.values)) {
++      streamFields.values.forEach((item: any) => {
++        const key = item?.value ?? '';
++        if (key !== '') {
++          streamFieldMap[key] = null;
++        }
++      });
++    }
++    streamFieldMapRef.current = streamFieldMap;
++    //
++
++    const fieldMap: Record<string, null> = {};
++    if (Array.isArray(resp?.values)) {
++      resp.values.forEach((item: any) => {
++        const key = item?.value ?? '';
++        if (key === '') {
++          return;
++        }
++        if (key in sysFields) {
++          return;
++        }
++        if (key in streamFieldMap) {
++          return;
++        }
++        fieldMap[key] = null;
++      });
++    }
++    fieldMapRef.current = fieldMap;
++    showFieldSelector();
++  };
++
++  const buildFieldSelectorOptions = (filterText?: string) => {
++    const normalizedFilter = filterText?.trim().toLowerCase();
++    const keys = Object.keys(fieldMapRef.current ?? {}).sort();
++    return keys
++      .filter((k) => k !== '' && k.substring(0, 1) >= 'A')
++      .filter((k) => !normalizedFilter || k.toLowerCase().includes(normalizedFilter))
++      .map((k) => ({ label: k, value: k }));
++  };
++
++  // 第一次加载时，展示 field 的选择框
++  const showFieldSelector = () => {
++    const opts = buildFieldSelectorOptions();
++    setSelectOptions("htmlSelectForFieldNames", opts);
++  };
++
++  // 输入字段名的 textbox, 处理 onKeyUp 事件
++  const onFieldNameInputKeyUp = (inputValue: string) => {
++    // vlogs 做不到动态查询字段名，所以只能本地过滤
++    const sel = document.getElementById('htmlSelectForFieldNames') as HTMLSelectElement | null;
++    if (!sel) {
++      return;
++    }
++    if (sel.options.length < 7) {
++      return;
++    }
++    // 筛选出以前缀开头的字段
++    inputValue = inputValue.trim();
++    const l = inputValue.length;
++    let start = 0;
++    for (let i = 0; i < sel.options.length; i++) {
++      const fieldName = sel.options[i].value;
++      if (fieldName.length < l) {
++        continue;
++      }
++      if (fieldName.substring(0, l) !== inputValue) {
++        continue;
++      }
++      if (i > start) {
++        sel.insertBefore(sel.options.item(i) as HTMLOptionElement, sel.options.item(start));
++
++      }
++      start++;
++    }
++    // 继续搜索中缀匹配的内容
++    for (let i = start; i < sel.options.length; i++) {
++      const fieldName = sel.options[i].value;
++      if (fieldName.length < l) {
++        continue;
++      }
++      if (!fieldName.includes(inputValue)) {
++        continue;
++      }
++      if (i > start) {
++        sel.insertBefore(sel.options.item(i) as HTMLOptionElement, sel.options.item(start));
++      }
++      start++;
++    }
++    if (start > 0) {
++      sel.options.selectedIndex = 0;
++    }
++  };
++
++  const onFieldNameInputBlur = async (inputValue: string) => {
++    // 开始拉取字段的值
++    const values = await loadFieldValues(inputValue, '');
++    const options = values.map((v: any) => ({ label: v, value: v }));
++    setSelectOptions("selForFieldValues", options);
++  };
++
++  const onFieldNameSelectDoubleClick = (value: string) => {
++    const fieldNameInput = document.getElementById('textboxForFieldNames') as HTMLInputElement | null;
++    if (!fieldNameInput) {
++      return;
++    }
++    fieldNameInput.value = value;
++    onFieldNameInputBlur(value);
++  };
++
++  const getOutputFieldChooseMode = (): boolean => {
++    return outputAllFields;
++  }
++
++  // 点击显示全部字段的按钮
++  const onRadioButtonAllFields = () => {
++    const container = document.getElementById('chooseOutputFieldsContainer');
++    if (!container) {
++      return;
++    }
++    container.style.display = "none";
++    generateLogsQL(false);
++  };
++
++  // 点击选择字段的按钮
++  const onRadioButtonChooseFields = () => {
++    const container = document.getElementById('chooseOutputFieldsContainer');
++    if (!container) {
++      return;
++    }
++    container.style.display = "block";
++    let m = fieldsAfterStreamFilterRef.current;
++    if (Object.keys(m).length == 0) {
++      m = fieldMapRef.current;
++    }
++    const txtFieldsList = document.getElementById('txtOutputFieldsList') as HTMLTextAreaElement | null;
++    if (txtFieldsList) {
++      txtFieldsList.value = '_msg, ' + Object.keys(m).join(', ');
++    }
++    generateLogsQL(false);
++  };
++
++  const onClickMultiLineButton = () => {
++    const txtFieldsList = document.getElementById('txtOutputFieldsList') as HTMLTextAreaElement | null;
++    if (txtFieldsList) {
++      txtFieldsList.value = tidyOutputFields(txtFieldsList?.value ?? '').join('\n');
++    }
++  }
++
++  const onClickSingleLineButton = () => {
++    const txtFieldsList = document.getElementById('txtOutputFieldsList') as HTMLTextAreaElement | null;
++    if (txtFieldsList) {
++      txtFieldsList.value = tidyOutputFields(txtFieldsList?.value ?? '').join(', ');
++    }
++  }
++
++  const tidyOutputFields = (s: string): string[] => {
++    let arr = s.split('\n');
++    arr = arr.map((s) => s.trim());
++    let arr2 = [];
++    for (let i = 0; i < arr.length; i++) {
++      let item = arr[i];
++      if (item.includes(',')) {
++        const temp = item.split(',').map((s) => s.trim());
++        for (let j = 0; j < temp.length; j++) {
++          if (temp[j] !== '') {
++            arr2.push(temp[j]);
++          }
++        }
++        continue;
++      }
++      if (item === '') {
++        continue;
++      }
++      arr2.push(arr[i]);
++    }
++    return arr2.sort();
++  }
++
++  const outputAllFieldsOnChange = (next: boolean) => {
++    if (next) {
++      onRadioButtonAllFields();
++    } else {
++      onRadioButtonChooseFields();
++    }
++  };
++
++  // 动态加载字段的名字
++  const loadFieldNamesDynamic = async () => {
++    const uid = await resolveDatasourceUid();
++    if (!uid) {
++      console.error('loadFFieldNamesByStreamFields: datasource uid not found');
++      setTestError('loadFFieldNamesByStreamFields: datasource uid not found');
++      return;
++    }
++    try {
++      const filters = streamFiltersRef.current;
++      const expressions: string[] = [];
++      if (Object.keys(filters).length === 0) {
++        expressions.push('*');
++      } else {
++        Object.keys(filters).forEach((key) => {
++          const op = filters[key]?.operator ?? '';
++          const val = filters[key]?.value ?? '';
++          const mapped = operatorMap[op] ?? op;
++          if (mapped.includes('xxx')) {
++            expressions.push(`\"${key}\"${mapped.replace('xxx', JSON.stringify(val ?? ''))}`);
++          } else {
++            expressions.push(`\"${key}\"${mapped}${val}`);
++          }
++        });
++      }
++      //
++      const queryExpr = expressions.join(' '); // 表达式之间以空格分割
++      let postData = {
++        query: queryExpr,
++        start: getStartRange(),
++        end: 'now',
++        limit: `${defaultRecordCount}`,
++      };
++      const resp = await getBackendSrv().post(`/api/datasources/uid/${uid}/resources/select/logsql/field_names`, postData);
++      const keys = Array.isArray(resp?.values)
++        ? resp.values
++          .map((item: any) => item?.value ?? '')
++          .filter((k: string) => k !== '' && !(k in sysFields) && !(k in streamFieldMapRef.current))
++          .sort()
++        : [];
++      const opts: Option[] = keys.map((k: string) => ({ label: k, value: k }));
++      let temp: Record<string, any> = {};
++      keys.forEach((item: string) => {
++        temp[item] = null;
++      });
++      fieldsAfterStreamFilterRef.current = temp;
++      setSelectOptions("htmlSelectForFieldNames", opts);
++    } catch (err) {
++      console.error('loadFFieldNamesByStreamFields error', err);
++    }
++  };
++
++  const onSelectForFieldValuesDoubleClick = (value: string) => {
++    const fieldValueInput = document.getElementById('textboxForFieldValues') as HTMLInputElement | null;
++    if (!fieldValueInput) {
++      return;
++    }
++    fieldValueInput.value = value;
++    //
++    addFieldFilter();
++  }
++
++  const onFieldValueInputKeyUp = async (value: string) => {
++    // 根据输入去查询 field 的值
++    const textboxForFieldNames = document.getElementById('textboxForFieldNames') as HTMLInputElement | null;
++    if (!textboxForFieldNames) {
++      return;
++    }
++    const fieldName = textboxForFieldNames.value.trim();
++    if (fieldName === '') {
++      return;
++    }
++    const values = await loadFieldValues(fieldName, value);
++    const options = values.map((v: any) => ({ label: v, value: v }));
++    setSelectOptions("selForFieldValues", options);
++    // 对下载到的内容进行排序
++    const sel = document.getElementById('selForFieldValues') as HTMLSelectElement | null;
++    if (!sel) {
++      return;
++    }
++    let start = 0;
++    for (let i = 0; i < sel.options.length; i++) {
++      const fieldValue = sel.options[i].value;
++      if (fieldValue.length < value.length) {
++        continue;
++      }
++      if (fieldValue.substring(0, value.length) !== value) {
++        continue;
++      }
++      if (i > start) {
++        sel.insertBefore(sel.options.item(i) as HTMLOptionElement, sel.options.item(start));
++      }
++      start++;
++    }
++    for (let i = start; i < sel.options.length; i++) {
++      const fieldValue = sel.options[i].value;
++      if (fieldValue.length < value.length) {
++        continue;
++      }
++      if (!fieldValue.includes(value)) {
++        continue;
++      }
++      if (i > start) {
++        sel.insertBefore(sel.options.item(i) as HTMLOptionElement, sel.options.item(start));
++      }
++      start++;
++    }
++    if (start > 0) {
++      sel.options.selectedIndex = 0;
++    }
++  };
++
++  const onFieldValueInputBlur = (value: string) => {
++    addFieldFilter();
++  };
++
++  const onChangeOfselForFieldOperator = () => {
++    addFieldFilter();
++  }
++
++  const showJSLog = (s: string, color: string) => {
++    const div = document.getElementById('jslog') as HTMLDivElement || null;
++    if (!div) {
++      return;
++    }
++    if (div.style.display === 'none') {
++      return;
++    }
++    const now = new Date();
++    const formattedTime =
++      String(now.getMinutes()).padStart(2, '0') +
++      ':' +
++      String(now.getSeconds()).padStart(2, '0') +
++      '.' +
++      String(now.getMilliseconds()).padStart(3, '0');
++    const newNode = document.createElement("DIV");
++    newNode.innerText = formattedTime + ' ' + s;
++    if (color.length > 0) {
++      newNode.style.color = color;
++    }
++    div.appendChild(newNode);
++  }
++
++  return (
++    <div style={{ height, overflowY: 'auto' }}>
++      <table style={{ borderCollapse: 'collapse' }} border={0}>
++        <tbody>
++          <tr>
++            <td>
++              <table style={{ borderCollapse: 'collapse' }} border={1}>
++                <tbody>
++                  <tr>
++                    <td style={{ verticalAlign: 'top', paddingRight: '12px', whiteSpace: 'nowrap' }} width="100">
++                      stream fields:
++                      <br />
++                      <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
++                        <input
++                          type="checkbox"
++                          checked={cascadeFiltering}
++                          onChange={(e) => setCascadeFiltering(e.currentTarget.checked)}
++                        />
++                        Cascade Filtering
++                      </label>
++                    </td>
++                    <td id="stream_filter_container" style={{ paddingBottom: '8px' }}>
++                      <table style={{ width: '500' }}>
++                        <tbody id="stream_filter_tbody"></tbody>
++                      </table>
++                    </td>
++                  </tr>
++                  <tr>
++                    <td style={{ padding: '4px 12px 4px 0', whiteSpace: 'nowrap' }}>fields:
++                      <br />
++                      <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
++                        <input
++                          type="checkbox"
++                          checked={filterByStreamFields}
++                          id="chkUseStreamFilter"
++                          onChange={onFilterByStreamFieldsChange}
++                        />
++                        filter by stream fields
++                      </label>
++
++                    </td>
++                    <td style={{ padding: '4px 0' }}>
++                      <table style={{ width: '800' }} border={1}>
++                        <tbody id="field_filter_tbody">
++                          <tr>
++                            <td colSpan={3} >
++                              <div id="addedFixedFieldFilters"></div>
++                              <div id="addedFieldFilters"></div>
++                            </td>
++                          </tr>
++                          <tr>
++                            <td valign="bottom">
++                              <input
++                                type="text"
++                                placeholder="Input field name or double click to choose one."
++                                onKeyUp={(event) => onFieldNameInputKeyUp(event.currentTarget.value)}
++                                onBlur={(event) => onFieldNameInputBlur(event.currentTarget.value)}
++                                style={{ width: '250px', padding: '4px 8px', border: '1px', borderColor: 'gray' }}
++                                id="textboxForFieldNames"
++                              />
++                              <br />
++                              <select
++                                size={8}
++                                style={{ width: '250px', padding: '4px 8px' }}
++                                id="htmlSelectForFieldNames"
++                                onDoubleClick={(event) => onFieldNameSelectDoubleClick(event.currentTarget.value ?? '')}
++                              >
++                              </select>
++                            </td>
++                            <td valign="bottom">
++                              Operator:<br />
++                              <select
++                                size={8}
++                                style={{ width: '180px', padding: '4px 8px' }}
++                                id="selForFieldOperator"
++                                onChange={(event) => {
++                                  onChangeOfselForFieldOperator();
++                                }}
++                              >
++                              </select>
++                            </td>
++                            <td valign="bottom">
++                              <input
++                                type="text"
++                                style={{ width: '260px', padding: '4px 8px', border: '1px', borderColor: 'gray' }}
++                                id="textboxForFieldValues"
++                                onKeyUp={(event) => onFieldValueInputKeyUp(event.currentTarget.value)}
++                                onBlur={(event) => onFieldValueInputBlur(event.currentTarget.value)}
++                                placeholder="Input field value or double click to choose one."
++                              />
++                              <br />
++                              <select size={8} style={{ width: '260px', padding: '4px 8px' }}
++                                id="selForFieldValues"
++                                onDoubleClick={(event) => {
++                                  const selectedValue = event.currentTarget.value ?? '';
++                                  onSelectForFieldValuesDoubleClick(selectedValue);
++                                }}
++                              >
++                              </select>
++                            </td>
++                          </tr>
++                        </tbody>
++                      </table>
++                    </td>
++                  </tr>
++                  <tr>
++                    <td style={{ padding: '4px 12px 4px 0', whiteSpace: 'nowrap' }}>
++                      message: &nbsp;&nbsp;
++                      <div style={{ display: 'inline-flex', alignItems: 'right', marginLeft: '8px' }}>
++
++                        <Switch
++                          value={messageFilterEnabled}
++                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
++                            onMessageToggle(e.currentTarget.checked);
++                          }}
++                        />
++                      </div>
++                    </td>
++                    <td style={{ padding: '4px 0' }} valign="top">
++                      <div style={{ display: messageFilterEnabled ? 'flex' : 'none', gap: '8px', alignItems: 'center', maxWidth: '500px' }}>
++                        <Combobox
++                          width={25}
++                          options={[
++                            { label: ':~ (regexp match)', value: ':~' },
++                            { label: ':!~ (not match)', value: ':!~' },
++                            { label: ':xxx* (prefix)', value: ':xxx*' },
++                            { label: ':*xxx* (substring)', value: ':*xxx*' },
++                          ]}
++                          onChange={(v) => onFieldOperatorChange(v.value)}
++                          placeholder="choose operator"
++                        />
++                        <TextArea
++                          aria-label="Message value"
++                          value={messageValue}
++                          onChange={(e) => setMessageValue(e.currentTarget.value)}
++                          onBlur={(e) => onFieldValueBlur(e.currentTarget.value)}
++                          rows={3}
++                          style={{ flex: 1 }}
++                          placeholder="enter search content for _msg field"
++                        />
++                      </div>
++                    </td>
++                  </tr>
++                  <tr>
++                    <td style={{ padding: '4px 12px 4px 0', whiteSpace: 'nowrap' }}>
++                      Full text search: &nbsp;&nbsp;
++                      <div style={{ display: 'inline-flex', alignItems: 'right', marginLeft: '8px' }}>
++                        <Switch
++                          value={fullTextSearchEnabled}
++                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
++                            onFullTextSearchToggle(e.currentTarget.checked);
++                          }}
++                        />
++                      </div>
++                    </td>
++                    <td style={{ padding: '4px 0' }} valign="top">
++                      <div style={{ display: fullTextSearchEnabled ? 'flex' : 'none', gap: '8px', alignItems: 'center', maxWidth: '500px' }}>
++                        <Select
++                          width={25}
++                          options={fullTextSearchOptions}
++                          allowCustomValue={false}
++                          placeholder="choose operator"
++                          value={
++                            fullTextSearchOperator
++                              ? (fullTextSearchOptions.find((o) => o.value === fullTextSearchOperator) ?? null)
++                              : null
++                          }
++                          onChange={(v) => setFullTextSearchOperator(v.value ?? null)}
++                        />
++                        <TextArea
++                          aria-label="Full text search"
++                          placeholder="enter full text search content"
++                          value={fullTextSearch}
++                          onChange={(e) => setFullTextSearch(e.currentTarget.value)}
++                          onBlur={(e) => onFullTextSearchBlur(e.currentTarget.value)}
++                          rows={3}
++                          style={{ flex: 1 }}
++                        />
++                      </div>
++                    </td>
++                  </tr>
++
++                  <tr>
++                    <td>Global sort option:</td>
++                    <td>
++                      <div style={{ marginTop: '6px', display: 'inline-flex', gap: '12px', alignItems: 'center' }}>
++                        <span>use global sort: </span>
++                        <Switch
++                          value={useGlobalSort}
++                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
++                            const next = e.currentTarget.checked;
++                            setUseGlobalSort(next);
++                            generateLogsQL(true, undefined, {
++                              enabled: next,
++                              field: globalSortField,
++                              desc: globalSortDesc,
++                            });
++                          }}
++                        />
++                        
++                        <span>field name:</span>
++                        <input
++                          type="text"
++                          value={globalSortField}
++                          disabled={!useGlobalSort}
++                          onChange={(e) => setGlobalSortField(e.currentTarget.value)}
++                          onBlur={() => {
++                            if (useGlobalSort) {
++                              generateLogsQL(true, undefined, {
++                                enabled: true,
++                                field: globalSortField,
++                                desc: globalSortDesc,
++                              });
++                            }
++                          }}
++                          style={{ width: '160px' }}
++                        />
++                        <span>DESC:</span>
++                        <Switch
++                          value={globalSortDesc}
++                          disabled={!useGlobalSort}
++                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
++                            const next = e.currentTarget.checked;
++                            setGlobalSortDesc(next);
++                            generateLogsQL(true, undefined, {
++                              enabled: useGlobalSort,
++                              field: globalSortField,
++                              desc: next,
++                            });
++                          }}
++                        />
++                      </div>
++                    </td>
++                  </tr>
++                  <tr>
++                    <td>Output fields:</td>
++                    <td>
++                      <div style={{ marginTop: '6px', display: 'inline-flex', gap: '12px', alignItems: 'center' }}>
++                        <Switch
++                          value={outputAllFields}
++                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
++                            const next = e.currentTarget.checked;
++                            setOutputAllFields(next);
++                            outputAllFieldsOnChange(next);
++                            const btn1 = document.getElementById("btnSetToOneLine");
++                            const btn2 = document.getElementById("btnSetToMultiLine");
++                            if (btn1 && btn2) {
++                              if (next) {
++                                btn1.style.display = 'none';
++                                btn2.style.display = 'none';
++                              } else {
++                                btn1.style.display = 'block';
++                                btn2.style.display = 'block';
++                              }
++                            }
++                          }}
++                        />
++                        <span>Output all fields</span>
++
++                        <button
++                          type="button"
++                          id="btnSetToOneLine"
++                          style={{ display: 'none' }}
++                          onClick={() => {
++                            onClickSingleLineButton();
++                          }}
++                        >
++                          one line
++                        </button>
++                        <button
++                          type="button"
++                          id="btnSetToMultiLine"
++                          style={{ display: 'none' }}
++                          onClick={() => {
++                            onClickMultiLineButton();
++                          }}
++                        >
++                          multi line
++                        </button>
++
++                      </div>
++                      <div id="chooseOutputFieldsContainer" style={{ display: 'none' }}>
++                        <TextArea
++                          aria-label="Output preview"
++                          style={{ width: '100%', height: '150px' }}
++                          id="txtOutputFieldsList"
++                          onBlur={(e) => {
++                            generateLogsQL(false);
++                          }}
++                        />
++                      </div>
++                    </td>
++                  </tr>
++                  <tr>
++                    <td>Remove fields:</td>
++                    <td>
++                      <div style={{ marginTop: '6px', display: 'inline-flex', gap: '12px', alignItems: 'center' }}>
++                        <Switch
++                          value={removeFieldsEnabled}
++                          onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
++                            const next = e.currentTarget.checked;
++                            setRemoveFieldsEnabled(next);
++                            generateLogsQL(true, { enabled: next, text: removeFieldsText });
++                          }}
++                        />
++                        <span>Set Remove Fields</span>
++                        <button
++                          type="button"
++                          id="btnDeleteToSingleLine"
++                          style={{ display: removeFieldsEnabled ? 'block' : 'none' }}
++                          onClick={() => {
++                            const fields = parseRemoveFieldsText(removeFieldsText);
++                            setRemoveFieldsText(formatRemoveFieldsText(fields, 'single'));
++                          }}
++                        >
++                          single line
++                        </button>
++                        <button
++                          type="button"
++                          id="btnDeleteToMultiLine"
++                          style={{ display: removeFieldsEnabled ? 'block' : 'none' }}
++                          onClick={() => {
++                            const fields = parseRemoveFieldsText(removeFieldsText);
++                            setRemoveFieldsText(formatRemoveFieldsText(fields, 'multi'));
++                          }}
++                        >
++                          multi line
++                        </button>
++                      </div>
++                      <div id="removeFieldsContainer" style={{ display: removeFieldsEnabled ? 'block' : 'none' }}>
++                        <TextArea
++                          id="textboxForRemoveFields"
++                          aria-label="Remove fields"
++                          style={{ width: '100%', height: '120px' }}
++                          value={removeFieldsText}
++                          onChange={(e) => setRemoveFieldsText(e.currentTarget.value)}
++                          onBlur={() => {
++                            generateLogsQL(false);
++                          }}
++                        />
++                      </div>
++                    </td>
++                  </tr>
++                  <tr>
++                    <td style={{ padding: '4px 12px 4px 0', whiteSpace: 'nowrap' }}>output options</td>
++                    <td style={{ padding: '4px 0' }}>
++                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
++                        <input
++                          type="checkbox"
++                          id="checkboxForLimit"
++                          checked={limitEnabled}
++                          onChange={(e) => {
++                            setLimitEnabled(e.currentTarget.checked);
++                            generateLogsQL(true);
++                          }}
++                        />
++                        <span>limit:</span>
++                        <input
++                          id="textboxForLimit"
++                          type="number"
++                          value={limitValue}
++                          onChange={(e) => {
++                            const sanitized = e.currentTarget.value.replace(/\D+/g, '');
++                            setLimitValue(sanitized);
++                          }}
++                          onBlur={() => {
++                            generateLogsQL(true);
++                          }}
++                          style={{ width: '80px' }}
++                        />
++                      </div>
++                    </td>
++                  </tr>
++                  <tr>
++                    <td colSpan={2} style={{ textAlign: 'center', paddingTop: '12px' }} valign="top">
++                      <button
++                        type="button"
++                        onClick={onClickQueryButton}
++                        style={{ padding: '10px 24px', fontSize: '16px', borderRadius: '6px' }}
++                      >Query</button>
++                    </td>
++                  </tr>
++                </tbody>
++              </table>
++            </td>
++            <td width="400" valign="top" id="logsqlTextarea">
++              <div style={{ display: showLogsqlTextarea ? 'block' : 'none' }}>
++                <TextArea
++                  aria-label="LogSQL output"
++                  rows={10}
++                  placeholder="LogSQL preview"
++                  defaultValue=""
++                  style={{ width: '100%' }}
++                  id="logsql"
++                />
++                <div style={{ display: 'flex', justifyContent: 'center', marginTop: '12px' }}>
++                  <button type="button" style={{ padding: '8px 8px', marginLeft: '12px' }} onClick={onLogsqlReset}>
++                    Reset
++                  </button>&nbsp;&nbsp;
++                  <button style={{ padding: '8px 8px' }} onClick={onLogsqlCopy}>
++                    Copy LogSQL
++                  </button>
++                  <button style={{ padding: '8px 8px', marginLeft: '12px' }} onClick={onLogsqlTest}>
++                    Test LogsQL
++                  </button>
++                  <button
++                    type="button"
++                    onClick={onClickQueryButton}
++                    style={{ padding: '8px 8px', marginLeft: '12px' }}
++                  >
++                    Query
++                  </button>
++                </div>
++                <div id="testResult">{testResult}</div>
++                <div style={{ color: 'red' }}>{testError}</div>
++                <div id="jslog" style={{ border: 0, height: '200px', maxHeight: '200px', overflow: 'scroll', display: 'none' }}></div>
++              </div>
++            </td>
++          </tr>
++        </tbody>
++      </table>
++      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
++        <label htmlFor="step-combobox" style={{ whiteSpace: 'nowrap' }}>
++          Step:
++        </label>
++        <Combobox
++          id="step-combobox"
++          width={20}
++          options={stepComboboxOptions}
++          value={stepValue}
++          createCustomValue={false}
++          onChange={onStepComboboxChange}
++          placeholder="1m"
++        />
++        Group Fields:&nbsp;
++        <input
++          type="text"
++          key={configuredHitsGroupFields}
++          defaultValue={configuredHitsGroupFields}
++          onKeyDown={(event) => {
++            if (event.key === 'Enter') {
++              applyTimeSeriesFieldsInput(event.currentTarget.value);
++            }
++          }}
++          onBlur={(event) => {
++            applyTimeSeriesFieldsInput(event.currentTarget.value);
++          }}
++          placeholder={configuredHitsGroupFields}
++          style={{ width: '220px' }}
++        />
++        <span>hits query spend time: {hitsQueryDuration}ms</span>
++      </div>
++      <div style={{ width: '100%', height: `${timeSeriesHeight}px`, marginTop: '12px', display: 'flex', gap: '12px' }}>
++        <div style={{ flex: '1 1 auto', minWidth: 0, height: '100%', display: 'flex', flexDirection: 'column' }}>
++          {timeSeriesFrames.length > 0 && timeSeriesWidth > 0 ? (
++            <>
++              <div style={{ flex: '1 1 auto', minHeight: 0 }}>
++                <TimeSeries
++                  width={timeSeriesWidth}
++                  height={timeSeriesPlotHeight}
++                  frames={timeSeriesFramesForViz}
++                  timeRange={timeRange}
++                  timeZone={timeZone}
++                  legend={timeSeriesLegend}
++                  options={logVolumeVizOptions}
++                >
++                  {(config, alignedFrame) => {
++                    const renderTooltip = (_u: unknown, dataIdxs: Array<number | null>, seriesIdx: number | null) => {
++                      if (!alignedFrame?.fields?.length) {
++                        return null;
++                      }
++                      const xField = alignedFrame.fields[0];
++                      if (!xField) {
++                        return null;
++                      }
++                      let xIdx: number | null = null;
++                      if (seriesIdx != null && dataIdxs[seriesIdx] != null) {
++                        xIdx = dataIdxs[seriesIdx];
++                      } else {
++                        for (let i = 1; i < alignedFrame.fields.length; i++) {
++                          const idx = dataIdxs[i];
++                          if (idx != null) {
++                            xIdx = idx;
++                            break;
++                          }
++                        }
++                      }
++                      if (xIdx == null) {
++                        return null;
++                      }
++                      const xDisplay = xField.display ?? getDisplayProcessor({ field: xField, timeZone, theme });
++                      const timestamp = formattedValueToString(xDisplay(xField.values[xIdx]));
++                      const series = [];
++                      for (let i = 1; i < alignedFrame.fields.length; i++) {
++                        const field = alignedFrame.fields[i];
++                        if (!field) {
++                          continue;
++                        }
++                        if (field.type !== FieldType.number && field.type !== FieldType.enum) {
++                          continue;
++                        }
++                        if (field.config?.custom?.hideFrom?.tooltip || field.config?.custom?.hideFrom?.viz) {
++                          continue;
++                        }
++                        const display = (field.display ?? getDisplayProcessor({ field, timeZone, theme }))(field.values[xIdx]);
++                        series.push({
++                          color: display.color ?? FALLBACK_COLOR,
++                          label: getFieldDisplayName(field, alignedFrame, timeSeriesFrames),
++                          value: formattedValueToString(display),
++                          isActive: seriesIdx === i,
++                        });
++                      }
++                      if (!series.length) {
++                        return null;
++                      }
++                      return <SeriesTable timestamp={timestamp} series={series} />;
++                    };
++                    return (
++                      <TooltipPlugin2
++                        config={config}
++                        hoverMode={tooltipHoverModeAll}
++                        queryZoom={onQueryZoom}
++                        render={renderTooltip}
++                      />
++                    );
++                  }}
++                </TimeSeries>
++              </div>
++              {timeSeriesLegendItems.length > 0 && (
++                <div
++                  style={{
++                    flex: '0 0 auto',
++                    height: `${timeSeriesLegendHeight}px`,
++                    overflowY: 'auto',
++                    padding: '4px 8px',
++                  }}
++                >
++                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', alignItems: 'center' }}>
++                    {timeSeriesLegendItems.map((item) => {
++                      const isSelected =
++                        selectedSeries?.frameIndex === item.fieldIndex.frameIndex &&
++                        selectedSeries?.fieldIndex === item.fieldIndex.fieldIndex;
++                      const isDimmed = Boolean(selectedSeries) && !isSelected;
++                      return (
++                        <button
++                          key={`${item.fieldIndex.frameIndex}-${item.fieldIndex.fieldIndex}`}
++                          type="button"
++                          title={item.label}
++                          aria-pressed={isSelected}
++                          onClick={() => onLegendItemClick(item)}
++                          style={{
++                            display: 'inline-flex',
++                            alignItems: 'center',
++                            gap: '6px',
++                            background: 'none',
++                            border: 'none',
++                            padding: 0,
++                            cursor: 'pointer',
++                            color: isDimmed ? theme.colors.text.secondary : theme.colors.text.primary,
++                            opacity: isDimmed ? 0.6 : 1,
++                            fontWeight: isSelected ? 600 : 400,
++                            whiteSpace: 'nowrap',
++                          }}
++                        >
++                          <SeriesIcon color={item.color} />
++                          <span>{item.label}</span>
++                        </button>
++                      );
++                    })}
++                  </div>
++                </div>
++              )}
++            </>
++          ) : (
++            <div
++              style={{
++                width: '100%',
++                height: '100%',
++                display: 'flex',
++                alignItems: 'center',
++                justifyContent: 'center',
++                border: '1px solid #ddd',
++              }}
++            >
++              No time series data
++            </div>
++          )}
++        </div>
++        <div
++          style={{
++            flex: '0 0 auto',
++            width: `${pieChartWidth}px`,
++            height: '100%',
++            padding: '8px',
++            boxSizing: 'border-box',
++          }}
++        >
++          {pieChartData.slices.length > 0 ? (
++            <VizLayout
++              width={pieChartWidth - 16}
++              height={timeSeriesHeight - 16}
++              legend={
++                pieChartOptions.legend.showLegend ? (
++                  <VizLayout.Legend placement={pieChartOptions.legend.placement}>
++                    <div
++                      style={{
++                        display: 'flex',
++                        flexDirection: 'column',
++                        gap: '8px',
++                        paddingRight: '5px',
++                        minWidth: '340px',
++                        width: '340px',
++                      }}
++                    >
++                      {pieChartData.slices.map((slice) => {
++                        const showPercent = pieChartOptions.legend.values.includes('percent');
++                        const showValue = pieChartOptions.legend.values.includes('value');
++                        const columns = [
++                          'auto',
++                          'minmax(0, 1fr)',
++                          showValue ? 'minmax(72px, auto)' : '',
++                          showPercent ? 'minmax(64px, auto)' : '',
++                        ].filter(Boolean).join(' ');
++                        return (
++                          <div
++                            key={slice.label}
++                            style={{
++                              display: 'grid',
++                              gridTemplateColumns: columns,
++                              columnGap: '12px',
++                              alignItems: 'center',
++                              padding: '2px 0',
++                            }}
++                          >
++                            <SeriesIcon color={slice.color} />
++                            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
++                              {slice.label}
++                            </div>
++                            {showValue && (
++                              <div
++                                style={{
++                                  textAlign: 'right',
++                                  fontVariantNumeric: 'tabular-nums',
++                                  whiteSpace: 'nowrap',
++                                }}
++                              >
++                                {slice.displayValue}
++                              </div>
++                            )}
++                            {showPercent && (
++                              <div
++                                style={{
++                                  textAlign: 'right',
++                                  fontVariantNumeric: 'tabular-nums',
++                                  whiteSpace: 'nowrap',
++                                }}
++                              >
++                                {slice.displayPercent}
++                              </div>
++                            )}
++                          </div>
++                        );
++                      })}
++                    </div>
++                  </VizLayout.Legend>
++                ) : null
++              }
++            >
++              {(vizWidth: number, vizHeight: number) => {
++                const size = Math.min(vizWidth, vizHeight);
++                const radius = Math.max(0, size / 2 - 4);
++                const cx = vizWidth / 2;
++                const cy = vizHeight / 2;
++                const labelRadius = Math.max(0, radius * 0.65);
++                const labelFontSize = Math.max(9, Math.min(12, radius * 0.12));
++                const tooltipOffset = 10;
++                const tooltipWidth = 220;
++                const tooltipHeight = 56;
++                const tooltipX = pieTooltip
++                  ? Math.min(Math.max(pieTooltip.x + tooltipOffset, 0), Math.max(0, vizWidth - tooltipWidth))
++                  : 0;
++                const tooltipY = pieTooltip
++                  ? Math.min(Math.max(pieTooltip.y + tooltipOffset, 0), Math.max(0, vizHeight - tooltipHeight))
++                  : 0;
++                let cumulative = 0;
++                return (
++                  <div
++                    style={{ width: vizWidth, height: vizHeight, position: 'relative' }}
++                    onMouseLeave={clearPieTooltip}
++                  >
++                    <svg width={vizWidth} height={vizHeight} viewBox={`0 0 ${vizWidth} ${vizHeight}`}>
++                      {pieChartData.slices.map((slice) => {
++                        const startAngle = (cumulative / pieChartData.total) * 360 - 90;
++                        const endAngle = ((cumulative + slice.value) / pieChartData.total) * 360 - 90;
++                        const midAngle = (startAngle + endAngle) / 2;
++                        const labelPos = polarToCartesian(cx, cy, labelRadius, midAngle);
++                        const isHovered = pieTooltip?.label === slice.label;
++                        const fillColor = isHovered ? slice.hoverColor : slice.color;
++                        cumulative += slice.value;
++                        return (
++                          <g key={slice.label}>
++                            <path
++                              d={describeArc(cx, cy, radius, startAngle, endAngle)}
++                              fill={fillColor}
++                              stroke={theme.colors.background.primary}
++                              strokeWidth={1}
++                              onMouseMove={(event) => updatePieTooltip(event, slice)}
++                              onMouseEnter={(event) => updatePieTooltip(event, slice)}
++                              onMouseLeave={clearPieTooltip}
++                            />
++                            <text
++                              x={labelPos.x}
++                              y={labelPos.y}
++                              textAnchor="middle"
++                              dominantBaseline="middle"
++                              style={{
++                                fontSize: `${labelFontSize}px`,
++                                fontWeight: 500,
++                                fill: theme.colors.text.primary,
++                                stroke: theme.colors.background.primary,
++                                strokeWidth: 3,
++                                paintOrder: 'stroke',
++                                pointerEvents: 'none',
++                              }}
++                            >
++                              <tspan x={labelPos.x} dy="-0.35em">
++                                {slice.displayValue}
++                              </tspan>
++                              <tspan x={labelPos.x} dy="1.2em">
++                                {slice.displayPercent}
++                              </tspan>
++                            </text>
++                          </g>
++                        );
++                      })}
++                    </svg>
++                    {pieTooltip && (
++                      <div
++                        style={{
++                          position: 'absolute',
++                          left: tooltipX,
++                          top: tooltipY,
++                          pointerEvents: 'none',
++                          maxWidth: `${tooltipWidth}px`,
++                          padding: '6px 8px',
++                          borderRadius: '4px',
++                          background: theme.colors.background.primary,
++                          color: theme.colors.text.primary,
++                          boxShadow: '0 2px 8px rgba(0, 0, 0, 0.2)',
++                          fontSize: '12px',
++                          lineHeight: 1.4,
++                          whiteSpace: 'nowrap',
++                        }}
++                      >
++                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600 }}>
++                          <SeriesIcon color={pieTooltip.color} />
++                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{pieTooltip.label}</span>
++                        </div>
++                        <div style={{ marginTop: '2px', fontVariantNumeric: 'tabular-nums' }}>
++                          {pieTooltip.displayValue} ({pieTooltip.displayPercent})
++                        </div>
++                      </div>
++                    )}
++                  </div>
++                );
++              }}
++            </VizLayout>
++          ) : (
++            <div
++              style={{
++                width: '100%',
++                height: '100%',
++                display: 'flex',
++                alignItems: 'center',
++                justifyContent: 'center',
++              }}
++            >
++              No pie chart data
++            </div>
++          )}
++        </div>
++      </div>
++      <hr />
++      <table width="100%" style={{ borderCollapse: 'collapse' }} border={0}>
++        <tr>
++          <td align="left">
++            <input
++              type="text"
++              value={logSearchInput}
++              onChange={(event) => setLogSearchInput(event.currentTarget.value)}
++              onKeyDown={(event) => {
++                if (event.key === 'Enter') {
++                  const term = logSearchInput.trim();
++                  setLogHighlightTerm(term);
++                }
++              }}
++              onBlur={() => {
++                const term = logSearchInput.trim();
++                setLogHighlightTerm(term);
++              }}
++              placeholder="search logs"
++              style={{ padding: '4px 8px', border: '1px solid #ccc', borderRadius: '4px', width: '240px' }}
++            />
++            <span style={{ marginLeft: '12px', color: theme.colors.text.secondary, fontSize: '12px' }}>
++              {logsCount} logs
++            </span>
++            <span style={{ marginLeft: '12px', color: theme.colors.text.secondary, fontSize: '12px' }}>
++               spend time: {logsQueryDuration} ms
++            </span>
++          </td>
++          <td align="right" valign="top">
++            <div style={{ marginTop: '12px', display: 'flex', alignItems: 'right', gap: '8px', textAlign: 'right', width: '700px' }}>
++              <span>fold/expand</span>
++              <Switch
++                value={logsExpandAll}
++                onChange={(event) => {
++                  setLogsExpandAll(event.currentTarget.checked);
++                }}
++              />
++              <span>word wrap</span>
++              <Switch
++                value={logTagsWrap}
++                onChange={(event) => {
++                  setLogTagsWrap(event.currentTarget.checked);
++                }}
++              />
++
++              <span>font size</span>
++              <Combobox
++                width={10}
++                options={logFontSizeOptions}
++                value={logFontSize}
++                createCustomValue={false}
++                onChange={(option) => {
++                  setLogFontSize(option?.value ?? 12);
++                }}
++              />
++              <span>Save To Cookie</span>
++              <Switch
++                value={saveLogUiToCookie}
++                onChange={(event) => {
++                  setSaveLogUiToCookie(event.currentTarget.checked);
++                }}
++              />
++              <span>show JSON</span>
++              <Switch
++                value={showLogsJson}
++                onChange={(event) => {
++                  setShowLogsJson(event.currentTarget.checked);
++                }}
++              />
++            </div>
++          </td>
++        </tr>
++      </table>
++      {showLogsJson && (
++        <div style={{ marginTop: '12px' }}>
++          <TextArea
++            aria-label="Logs JSON"
++            style={{ width: '100%', height: '200px' }}
++            value={logsJsonText}
++            readOnly
++          />
++        </div>
++      )}
++
++      <div style={{ marginTop: '12px' }}>
++        <LogsPanel
++          id={id}
++          data={logsPanelData}
++          timeRange={timeRange}
++          timeZone={timeZone}
++          fieldConfig={fieldConfig}
++          options={logsPanelOptions}
++          width={panelWidth}
++          height={0}
++          transparent={transparent}
++          title={title}
++          renderCounter={renderCounter}
++          eventBus={eventBus}
++          onOptionsChange={onLogsPanelOptionsChange}
++          onFieldConfigChange={onFieldConfigChange}
++          replaceVariables={replaceVariables}
++          onChangeTimeRange={onChangeTimeRange}
++          expandAll={logsExpandAll}
++          highlightTerm={logHighlightTerm}
++          wrapTags={logTagsWrap}
++          logFontSize={logFontSize}
++          onTagFilter={onLogTagFilter}
++          onTagExclude={onLogTagExclude}
++          onTagHide={onLogTagHide}
++        />
++      </div>
++    </div>
++  );
++};
++
++export const plugin = new PanelPlugin<LogFilterOptions>(LogFilterPanel).setPanelOptions((builder) =>
++  builder
++    .addBooleanSwitch({
++      path: 'showLogsqlTextarea',
++      name: 'Show logsql textarea',
++      description: 'Show / hide the logsql textarea and actions',
++      defaultValue: true,
++    })
++    .addTextInput({
++      path: 'streamFieldList',
++      name: 'Stream field list',
++      description:
++        'Enter the stream fields you want to display, separated by commas. (All stream fields will be displayed automatically by default.)',
++      defaultValue: '',
++    })
++    .addTextInput({
++      path: 'logsqlVariable',
++      name: 'LogsQL Varaible',
++      description:
++        'After generating the logsql query statement, it can be output to a variable in a dashboard for other panels to reference.',
++      defaultValue: '$logsql',
++    })
++    .addTextInput({
++      path: 'hitsGroupFieldList',
++      name: 'Hits Group Field List',
++      description:
++        'Specify the fields to group by when calculating hit counts. Separate multiple fields with commas.',
++      defaultValue: 'level',
++    })
++    .addCustomEditor({
++      id: 'jsonConfig',
++      path: 'jsonConfig',
++      name: 'JSON config',
++      description:
++        'Use JSON for more complex configurations. Please refer to the documentation for configuration syntax.',
++      defaultValue: '',
++      editor: ({ value, onChange }) => {
++        const rows = Math.max(6, (value?.split('\n').length ?? 0) + 2);
++        return (
++          <TextArea
++            aria-label="JSON config"
++            rows={rows}
++            placeholder="Use JSON for more complex configurations. Please refer to the documentation for configuration syntax."
++            value={value ?? ''}
++            onChange={(event) => onChange(event.currentTarget.value)}
++          />
++        );
++      },
++    })
++);

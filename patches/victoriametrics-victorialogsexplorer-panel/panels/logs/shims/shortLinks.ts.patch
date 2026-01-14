@@ -1,0 +1,13 @@
+diff --git a/panels/logs/shims/shortLinks.ts b/panels/logs/shims/shortLinks.ts
+new file mode 100644
+index 0000000..bd6f0c2
+--- /dev/null
++++ b/panels/logs/shims/shortLinks.ts
+@@ -0,0 +1,7 @@
++export function createAndCopyShortLink(_url: string): Promise<void> {
++  return Promise.resolve();
++}
++
++export function getLogsPermalinkRange(_row: any, _rows: any[], range: { from: number; to: number }) {
++  return range;
++}
