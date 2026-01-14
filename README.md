@@ -16,3 +16,12 @@ A grafana panel for explorer logs on VictoriaLogs.
   - only patch modified file to template
 * `make diff`
   - after modify, update patch file
+
+## Functions
+
+A all-in-one log explorer.
+
+![](./doc/images/all-in-one-log-explorer.png)
+
+
+

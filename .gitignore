@@ -4,3 +4,4 @@
 /test/datasources/
 /test/plugins/
 /dist/
+.DS_Store
