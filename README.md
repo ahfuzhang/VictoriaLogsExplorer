@@ -16,6 +16,13 @@ A grafana panel for explorer logs on VictoriaLogs.
   - only patch modified file to template
 * `make diff`
   - after modify, update patch file
+* `make generate-by-docker`
+  - If you don't want to install nodejs tools
+* `make build-by-docker`
+* `make docker-run-test`
+  - test by "http://127.0.0.1:3001/"
+* `make docker-run-test-with-download`
+  - show how to download plugin and run in grafana.
 
 ## Functions
 
