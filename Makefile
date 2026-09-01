@@ -78,6 +78,8 @@ docker-run-test:
 		-v ./test/datasources/:/etc/grafana/provisioning/datasources/ \
 		grafana/grafana:12.1
 
+PKG_TAG=v0.2.0
+
 docker-run-test-with-download:
 	mkdir -p ./test/data/ && \
 	mkdir -p ./test/config/ && \
@@ -85,9 +87,9 @@ docker-run-test-with-download:
 	mkdir -p ./test/plugins/ && \
 	rm -rf ./test/plugins/* && \
 	cd ./test/plugins/ && \
-	wget "https://github.com/ahfuzhang/VictoriaLogsExplorer/releases/download/v0.1.0/victoriametrics-victorialogs-explorer-v0.1.0.tar.gz" && \
+	wget "https://github.com/ahfuzhang/VictoriaLogsExplorer/releases/download/$(PKG_TAG)/victoriametrics-victorialogs-explorer-$(PKG_TAG).tar.gz" && \
 	mkdir -p victoriametrics-victorialogs-explorer/ && \
-	tar -xzf victoriametrics-victorialogs-explorer-v0.1.0.tar.gz -C ./victoriametrics-victorialogs-explorer/
+	tar -xzf victoriametrics-victorialogs-explorer-$(PKG_TAG).tar.gz -C ./victoriametrics-victorialogs-explorer/
 	docker run -it --rm \
 		--name grafana_with_download \
 		-p 3002:3000 \
@@ -99,7 +101,7 @@ docker-run-test-with-download:
 		-v ./test/datasources/:/etc/grafana/provisioning/datasources/ \
 		grafana/grafana:12.1
 
-# make dist PKG_TAG=v0.1.0
+# make dist PKG_TAG=v0.2.0
 dist:
 	mkdir -p ./dist/$(DIR) && \
 	cd $(DIR)/dist/ && \
@@ -108,7 +110,7 @@ dist:
 	sha1sum dist/$(DIR)/$(plugin-name)-$(PKG_TAG).tar.gz > \
 	  dist/$(DIR)/$(plugin-name)-$(PKG_TAG)_checksums_tar.gz.txt
 
-# make gh-upload-release PKG_TAG=v0.1.0
+# make gh-upload-release PKG_TAG=v0.2.0
 gh-upload-release:
 	gh release create $(PKG_TAG) \
 		dist/$(DIR)/$(plugin-name)-$(PKG_TAG).tar.gz \
@@ -117,3 +119,17 @@ gh-upload-release:
 		--notes "$(plugin-name), version $(PKG_TAG) release."
 
 .PHONY: generate diff patch build dist gh-upload-release
+
+
+start_test_vlogs_server:
+	docker run -d --rm --name victorialogs \
+		-p 9428:9428 \
+		--cpuset-cpus="4,5" \
+		-m 512m \
+		-v /Users/ahfu/Downloads/temp/VictoriaLogsData/:/data/ \
+		-e GOMAXPROCS=2 \
+		victoriametrics/victoria-logs:v1.50.0 \
+		-storageDataPath=/data/ \
+		-inmemoryDataFlushInterval=30s \
+		-memory.allowedPercent=80 \
+		-retentionPeriod=3d

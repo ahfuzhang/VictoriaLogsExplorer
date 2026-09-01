@@ -1,9 +1,9 @@
 diff --git a/src/module.tsx b/src/module.tsx
 new file mode 100644
-index 0000000..89a0619
+index 0000000..841cc0f
 --- /dev/null
 +++ b/src/module.tsx
-@@ -0,0 +1,3938 @@
+@@ -0,0 +1,3947 @@
 +import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 +import { createRoot, type Root } from 'react-dom/client';
 +import {
@@ -27,6 +27,7 @@ index 0000000..89a0619
 +  type PanelProps,
 +  type TimeRange,
 +  type DataFrame,
++  type SelectableValue,
 +  toDataFrame,
 +} from '@grafana/data';
 +import { LegendDisplayMode, LogsSortOrder, TooltipDisplayMode, defaultVizLegendOptions, type VizLegendOptions } from '@grafana/schema';
@@ -506,6 +507,7 @@ index 0000000..89a0619
 +  const [fullTextSearchEnabled, setFullTextSearchEnabled] = useState<boolean>(false);
 +  const [messageFilterEnabled, setMessageFilterEnabled] = useState<boolean>(false);
 +  const [messageValue, setMessageValue] = useState<string>('');
++  const [messageFilterOperator, setMessageFilterOperator] = useState<string | null>(null);
 +  const [limitEnabled, setLimitEnabled] = useState<boolean>(true);
 +  const [limitValue, setLimitValue] = useState<string>('100');
 +  const [useGlobalSort, setUseGlobalSort] = useState<boolean>(false);
@@ -1067,6 +1069,7 @@ index 0000000..89a0619
 +    setMessageFilterEnabled(next);
 +    if (!next) {
 +      setMessageValue('');
++      setMessageFilterOperator(null);
 +      delete msgFiltersRef.current['_msg'];
 +    }
 +    generateLogsQL(true);
@@ -1494,6 +1497,7 @@ index 0000000..89a0619
 +        streamFilterTbody.innerHTML = '';
 +      }
 +      setMessageValue('');
++      setMessageFilterOperator(null);
 +      setFullTextSearch('');
 +      setFullTextSearchOperator(null);
 +      setFullTextSearchEnabled(false);
@@ -1940,6 +1944,7 @@ index 0000000..89a0619
 +    onInput?: (val: string | undefined | null) => void | Promise<void>;
 +  }> = ({ options, operator, streamField, selectId, placeholder, onInput }) => {
 +    const [localOptions, setLocalOptions] = useState<Option[]>(options);
++    const [selectedValue, setSelectedValue] = useState<SelectableValue<string> | null>(null);
 +    useEffect(() => {
 +      setLocalOptions(options);
 +    }, [options]);
@@ -1952,7 +1957,9 @@ index 0000000..89a0619
 +        name={selectId}
 +        placeholder={placeholder ?? 'type or select'}
 +        options={localOptions}
++        value={selectedValue}
 +        onChange={(v) => {
++          setSelectedValue(v);
 +          getFieldsByStreamFields(streamField, operator, v.value);
 +        }}
 +        onInputChange={(inputValue, actionMeta: any) => {
@@ -2089,6 +2096,7 @@ index 0000000..89a0619
 +  };
 +
 +  const onFieldOperatorChange = (value?: string | null) => {
++    setMessageFilterOperator(value ?? null);
 +    if (!messageFilterEnabled) {
 +      return;
 +    }
@@ -3123,6 +3131,7 @@ index 0000000..89a0619
 +                            { label: ':xxx* (prefix)', value: ':xxx*' },
 +                            { label: ':*xxx* (substring)', value: ':*xxx*' },
 +                          ]}
++                          value={messageFilterOperator}
 +                          onChange={(v) => onFieldOperatorChange(v.value)}
 +                          placeholder="choose operator"
 +                        />
