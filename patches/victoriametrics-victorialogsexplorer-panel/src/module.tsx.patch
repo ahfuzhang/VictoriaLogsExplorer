@@ -1,9 +1,9 @@
 diff --git a/src/module.tsx b/src/module.tsx
 new file mode 100644
-index 0000000..841cc0f
+index 0000000..047ff79
 --- /dev/null
 +++ b/src/module.tsx
-@@ -0,0 +1,3947 @@
+@@ -0,0 +1,3902 @@
 +import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 +import { createRoot, type Root } from 'react-dom/client';
 +import {
@@ -33,6 +33,8 @@ index 0000000..841cc0f
 +import { LegendDisplayMode, LogsSortOrder, TooltipDisplayMode, defaultVizLegendOptions, type VizLegendOptions } from '@grafana/schema';
 +import { Combobox, Select, SeriesIcon, SeriesTable, Switch, TextArea, TimeSeries, TooltipPlugin2, useTheme2, VizLayout, type ComboboxOption } from '@grafana/ui';
 +import { getBackendSrv, locationService } from '@grafana/runtime';
++import { formatLogsqlTimeRange } from './logsqlTimeRange';
++import { postMetadataRequest } from './metadataRequest';
 +import { LogsPanel } from '../panels/logs/LogsPanel';
 +import type { Options as LogsPanelOptions } from '../panels/logs/panelcfg.gen';
 +
@@ -1581,19 +1583,7 @@ index 0000000..841cc0f
 +      const idx = s.indexOf(']');
 +      if (idx != -1) {
 +        showJSLog('found 2', 'green');
-+        const sb = createStringBuilder();
-+        const rawFrom = timeRangeRef.current?.raw?.from;
-+        const rawTo = timeRangeRef.current?.raw?.to;
-+        const startStr = typeof rawFrom === 'string' ? rawFrom : timeRangeRef.current?.from?.toISOString();
-+        const endStr = typeof rawTo === 'string' ? rawTo : timeRangeRef.current?.to?.toISOString();
-+        if (startStr && endStr) {
-+          sb.append('_time:[');
-+          sb.append(startStr);
-+          sb.append(', ');
-+          sb.append(endStr);
-+          sb.append(']');
-+        }
-+        nextLogsql = sb.toString() + s.substring(idx + 1);
++        nextLogsql = formatLogsqlTimeRange(timeRangeRef.current, timeZone) + s.substring(idx + 1);
 +        logsql.value = nextLogsql;
 +        const varName: Record<string, any> = {};
 +        let varKey = `var-${logsqlVariable}`;
@@ -1614,7 +1604,7 @@ index 0000000..841cc0f
 +    }
 +    //const startsWithTime = /^_time:/.test(s);
 +    //showJSLog(`logsql starts with _time:: ${startsWithTime}`, startsWithTime ? 'green' : 'red');
-+  }, [loadLogsData, loadTimeSeriesData, logsqlVariable, timeRange]);
++  }, [loadLogsData, loadTimeSeriesData, logsqlVariable, timeRange, timeZone]);
 +
 +  // 根据配置，创建固定的某个字段的过滤器 UI
 +  const createFixedFieldFilterFromConfig = () => {
@@ -1760,16 +1750,9 @@ index 0000000..841cc0f
 +    //showJSLog('ready to generate logsql:' + hasLogsqlAtUrl.toString(), 'green');
 +    //
 +    const sb = createStringBuilder();
-+    const rawFrom = timeRangeRef.current?.raw?.from;
-+    const rawTo = timeRangeRef.current?.raw?.to;
-+    const startStr = typeof rawFrom === 'string' ? rawFrom : timeRangeRef.current?.from?.toISOString();
-+    const endStr = typeof rawTo === 'string' ? rawTo : timeRangeRef.current?.to?.toISOString();
-+    if (startStr && endStr) {
-+      sb.append('_time:[');
-+      sb.append(startStr);
-+      sb.append(', ');
-+      sb.append(endStr);
-+      sb.append('] ');
++    if (timeRangeRef.current) {
++      sb.append(formatLogsqlTimeRange(timeRangeRef.current, timeZone));
++      sb.append(' ');
 +    }
 +
 +
@@ -1984,8 +1967,6 @@ index 0000000..841cc0f
 +    }
 +    let postData = {
 +      query: '*',
-+      start: getStartRange(),
-+      end: 'now',
 +      limit: `${defaultRecordCount}`,
 +      field: fieldName,
 +    };
@@ -1993,7 +1974,7 @@ index 0000000..841cc0f
 +      postData.query = `${fieldName}:*${JSON.stringify(match)}*`;
 +    }
 +    try {
-+      const resp = await getBackendSrv().post(
++      const resp = await postMetadataRequest(
 +        `/api/datasources/uid/${uid}/resources/select/logsql/field_values`,
 +        postData
 +      );
@@ -2295,12 +2276,10 @@ index 0000000..841cc0f
 +      field: streamField,
 +      query: `${streamField}:~\".*${val}.*\"`,
 +      limit: `${defaultRecordCount}`,
-+      start: getStartRange(),
-+      end: 'now',
 +    };
 +
 +    try {
-+      const resp = await getBackendSrv().post(path, payload);
++      const resp = await postMetadataRequest(path, payload);
 +      if (source && source instanceof HTMLElement) {
 +        const options =
 +          Array.isArray(resp?.values) && resp.values.length
@@ -2441,11 +2420,9 @@ index 0000000..841cc0f
 +    if (queryStr.trim() === '') {
 +      queryStr = '*';
 +    }
-+    const resp = await getBackendSrv().post(`/api/datasources/uid/${uid}/resources/select/logsql/stream_field_values`, {
++    const resp = await postMetadataRequest(`/api/datasources/uid/${uid}/resources/select/logsql/stream_field_values`, {
 +      field: streamField,
 +      query: queryStr,
-+      start: getStartRange(),
-+      end: 'now',
 +      limit: `${defaultRecordCount}`,
 +    });
 +    const options =
@@ -2512,7 +2489,7 @@ index 0000000..841cc0f
 +      return;
 +    }
 +    if (resp.values.length === 0) {
-+      setTestError('The stream fields returned empty. Please select a larger time range and then refresh the entire page.');
++      setTestError('No stream fields were found. Check that the datasource contains recent logs, then refresh the page.');
 +    }
 +    const values = [...resp.values].sort((a: any, b: any) => {
 +      const ka = String(a?.value ?? '');
@@ -2588,22 +2565,6 @@ index 0000000..841cc0f
 +    }
 +  };
 +
-+  const getStartRange = () => {
-+    const from = timeRangeRef.current?.from?.valueOf();
-+    if (!Number.isFinite(from)) {
-+      return '1d';
-+    }
-+
-+    const startDate = new Date(from as number);
-+    startDate.setHours(0, 0, 0, 0);
-+    const startOfToday = new Date();
-+    startOfToday.setHours(0, 0, 0, 0);
-+    const msPerDay = 24 * 60 * 60 * 1000;
-+    const diffDays = Math.round((startOfToday.getTime() - startDate.getTime()) / msPerDay);
-+    const days = diffDays + 1; // today => 1d, yesterday => 2d, etc.
-+    return `${Math.max(days, 1)}d`;
-+  };
-+
 +  const getLogsqlFromURL = (): string => {
 +    // 如果 url 中有 var-logsql，则加到到 logsql 文本框中
 +    let varKey = `var-${logsqlVariable}`;
@@ -2647,21 +2608,17 @@ index 0000000..841cc0f
 +    const path = `/api/datasources/uid/${uid}/resources/select/logsql/stream_field_names`;
 +    const payload = {
 +      query: '*',
-+      start: getStartRange(),
-+      end: 'now',
 +      limit: `${defaultRecordCount}`,
 +    };
 +
 +    try {
-+      const streamFields = await getBackendSrv().post(path, payload);
++      const streamFields = await postMetadataRequest(path, payload);
 +      console.log('stream_field_names', streamFields);
 +      on_stream_field_names_response(streamFields);
 +
 +      // 加载所有的 field names
-+      const fieldNames = await getBackendSrv().post(`/api/datasources/uid/${uid}/resources/select/logsql/field_names`, {
++      const fieldNames = await postMetadataRequest(`/api/datasources/uid/${uid}/resources/select/logsql/field_names`, {
 +        query: '*',
-+        start: getStartRange(),
-+        end: 'now',
 +        limit: `${defaultRecordCount}`,
 +      });
 +      handleFieldNamesResponse(streamFields, fieldNames);
@@ -2889,11 +2846,9 @@ index 0000000..841cc0f
 +      const queryExpr = expressions.join(' '); // 表达式之间以空格分割
 +      let postData = {
 +        query: queryExpr,
-+        start: getStartRange(),
-+        end: 'now',
 +        limit: `${defaultRecordCount}`,
 +      };
-+      const resp = await getBackendSrv().post(`/api/datasources/uid/${uid}/resources/select/logsql/field_names`, postData);
++      const resp = await postMetadataRequest(`/api/datasources/uid/${uid}/resources/select/logsql/field_names`, postData);
 +      const keys = Array.isArray(resp?.values)
 +        ? resp.values
 +          .map((item: any) => item?.value ?? '')
