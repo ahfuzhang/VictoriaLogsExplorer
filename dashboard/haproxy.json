@@ -50,7 +50,7 @@
         }
       ],
       "title": "Log Explorer",
-      "type": "victoriametrics-victorialogs-explorer"
+      "type": "ahfuzhang-victorialogsexplorer-panel"
     }
   ],
   "preload": false,

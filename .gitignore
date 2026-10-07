@@ -1,7 +1,8 @@
-/victoriametrics*
 /test/config/provisioning/
 /test/data/
 /test/datasources/
 /test/plugins/
 /dist/
 .DS_Store
+.env
+victoriametrics-victorialogsexplorer-panel/

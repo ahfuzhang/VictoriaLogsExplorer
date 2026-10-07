@@ -1,7 +1,7 @@
 
 DIR=victoriametrics-victorialogsexplorer-panel
 BASE ?= baseline
-plugin-name=victoriametrics-victorialogs-explorer
+plugin-name=ahfuzhang-victorialogsexplorer-panel
 
 generate:
 	npx @grafana/create-plugin@latest \
@@ -87,9 +87,9 @@ docker-run-test-with-download:
 	mkdir -p ./test/plugins/ && \
 	rm -rf ./test/plugins/* && \
 	cd ./test/plugins/ && \
-	wget "https://github.com/ahfuzhang/VictoriaLogsExplorer/releases/download/$(PKG_TAG)/victoriametrics-victorialogs-explorer-$(PKG_TAG).tar.gz" && \
-	mkdir -p victoriametrics-victorialogs-explorer/ && \
-	tar -xzf victoriametrics-victorialogs-explorer-$(PKG_TAG).tar.gz -C ./victoriametrics-victorialogs-explorer/
+	wget "https://github.com/ahfuzhang/VictoriaLogsExplorer/releases/download/$(PKG_TAG)/ahfuzhang-victorialogsexplorer-panel-$(PKG_TAG).tar.gz" && \
+	mkdir -p ahfuzhang-victorialogsexplorer-panel/ && \
+	tar -xzf ahfuzhang-victorialogsexplorer-panel-$(PKG_TAG).tar.gz -C ./ahfuzhang-victorialogsexplorer-panel/
 	docker run -it --rm \
 		--name grafana_with_download \
 		-p 3002:3000 \
@@ -97,7 +97,7 @@ docker-run-test-with-download:
 		-e GF_PLUGINS_PREINSTALL=victoriametrics-logs-datasource \
 		-v ./test/data/:/var/lib/grafana \
 		-v ./test/config/:/etc/grafana \
-		-v ./test/plugins/victoriametrics-victorialogs-explorer/:/var/lib/grafana/plugins/victoriametrics-victorialogs-explorer/ \
+		-v ./test/plugins/ahfuzhang-victorialogsexplorer-panel/:/var/lib/grafana/plugins/ahfuzhang-victorialogsexplorer-panel/ \
 		-v ./test/datasources/:/etc/grafana/provisioning/datasources/ \
 		grafana/grafana:12.1
 

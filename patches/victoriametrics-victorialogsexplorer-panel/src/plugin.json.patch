@@ -1,13 +1,49 @@
 diff --git a/src/plugin.json b/src/plugin.json
-index 38de5d0..ea29ce5 100644
+index 38de5d0..3fd6dfa 100644
 --- a/src/plugin.json
 +++ b/src/plugin.json
-@@ -2,7 +2,7 @@
+@@ -2,19 +2,38 @@
    "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
    "type": "panel",
    "name": "VictoriaLogsExplorer",
 -  "id": "victoriametrics-victorialogsexplorer-panel",
-+  "id": "victoriametrics-victorialogs-explorer",
++  "id": "ahfuzhang-victorialogsexplorer-panel",
    "info": {
-     "keywords": ["panel"],
-     "description": "",
+-    "keywords": ["panel"],
+-    "description": "",
++    "keywords": ["panel", "victorialogs", "logs", "log explorer"],
++    "description": "An all-in-one Grafana panel for exploring logs stored in VictoriaLogs.",
+     "author": {
+-      "name": "Victoria metrics"
++      "name": "ahfuzhang",
++      "url": "https://github.com/ahfuzhang"
+     },
+     "logos": {
+       "small": "img/logo.svg",
+       "large": "img/logo.svg"
+     },
+-    "links": [],
+-    "screenshots": [],
++    "links": [
++      {
++        "name": "Website",
++        "url": "https://github.com/ahfuzhang/VictoriaLogsExplorer"
++      },
++      {
++        "name": "License",
++        "url": "https://github.com/ahfuzhang/VictoriaLogsExplorer/blob/main/victoriametrics-victorialogsexplorer-panel/LICENSE"
++      },
++      {
++        "name": "Issues",
++        "url": "https://github.com/ahfuzhang/VictoriaLogsExplorer/issues"
++      }
++    ],
++    "screenshots": [
++      {
++        "name": "All-in-one log explorer",
++        "path": "img/all-in-one-log-explorer.png"
++      }
++    ],
+     "version": "%VERSION%",
+     "updated": "%TODAY%"
+   },
