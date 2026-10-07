@@ -29,6 +29,7 @@ import { Combobox, Select, SeriesIcon, SeriesTable, Switch, TextArea, TimeSeries
 import { getBackendSrv, locationService } from '@grafana/runtime';
 import { formatLogsqlTimeRange } from './logsqlTimeRange';
 import { postMetadataRequest } from './metadataRequest';
+import { notifyError, queryDatasource } from './dsQuery';
 import { LogsPanel } from '../panels/logs/LogsPanel';
 import type { Options as LogsPanelOptions } from '../panels/logs/panelcfg.gen';
 
@@ -1195,34 +1196,32 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
 
     const queryStart = performance.now();
 
-    const body = {
-      queries: [
-        {
-          datasource: { type: 'victoriametrics-logs-datasource', uid: dsUid },
-          datasourceId: dsId ?? 0,
-          editorMode: 'code',
-          expr: logsql,
-          fields: fieldsForQuery,
-          legendFormat: '',
-          queryType: 'hits',
-          refId: 'A',
-          maxLines: 1000,
-          intervalMs,
-          maxDataPoints: 2221,
-          //maxDataPoints: (data as any)?.request?.maxDataPoints ?? 500,
-        },
-      ],
-      from: String(startTs),
-      to: String(endTs),
-    };
-
     try {
-      const requestId = `SQR${Math.random().toString(36).slice(2, 10)}`;
-      const resp = await getBackendSrv().post(
-        `/api/ds/query?ds_type=victoriametrics-logs-datasource&requestId=${requestId}`, // 调用后端查询接口
-        body // 查询请求体
+      const resp = await queryDatasource(
+        dsUid,
+        [
+          {
+            datasource: { type: 'victoriametrics-logs-datasource', uid: dsUid },
+            datasourceId: dsId ?? 0,
+            editorMode: 'code',
+            expr: logsql,
+            fields: fieldsForQuery,
+            legendFormat: '',
+            queryType: 'hits',
+            refId: 'A',
+            maxLines: 1000,
+            intervalMs,
+            maxDataPoints: 2221,
+          },
+        ],
+        startTs,
+        endTs,
+        { intervalMs, maxDataPoints: 2221 }
       );
-      const frames = resp?.results?.A?.frames; // 提取数据帧
+      if (resp.error) {
+        throw { statusText: resp.error };
+      }
+      const frames = resp.frames; // 提取数据帧
       if (Array.isArray(frames)) {
         showJSLog('loadTimeSeriesData: got frames', 'green');
         const parsed = frames.map((f: any) => toDataFrame(f)); // 将返回数据转为 DataFrame
@@ -1312,29 +1311,27 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
       setLogsError('');
       const queryStart = performance.now();
 
-      const body = {
-        queries: [
-          {
-            datasource: { type: 'victoriametrics-logs-datasource', uid: dsUid },
-            datasourceId: dsId ?? 0,
-            editorMode: 'code',
-            expr: logsql,
-            queryType: 'instant',
-            refId: 'A',
-            maxLines: logsMaxLines,
-          },
-        ],
-        from: String(startTs),
-        to: String(endTs),
-      };
-
       try {
-        const requestId = `SQR${Math.random().toString(36).slice(2, 10)}`;
-        const resp = await getBackendSrv().post(
-          `/api/ds/query?ds_type=victoriametrics-logs-datasource&requestId=${requestId}`,
-          body
+        const resp = await queryDatasource(
+          dsUid,
+          [
+            {
+              datasource: { type: 'victoriametrics-logs-datasource', uid: dsUid },
+              datasourceId: dsId ?? 0,
+              editorMode: 'code',
+              expr: logsql,
+              queryType: 'instant',
+              refId: 'A',
+              maxLines: logsMaxLines,
+            },
+          ],
+          startTs,
+          endTs
         );
-        const frames = resp?.results?.A?.frames;
+        if (resp.error) {
+          throw { statusText: resp.error };
+        }
+        const frames = resp.frames;
         if (Array.isArray(frames)) {
           const parsed = frames.map((f: any) => toDataFrame(f));
           setLogsFrames(parsed);
@@ -1617,7 +1614,7 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
           operatorText = defaultFieldOperatorOptions[0].label;
           break;
         default:
-          alert("not supported operator:" + item.field + " " + item.operator);
+          notifyError("not supported operator:" + item.field + " " + item.operator);
           return;
       }
       const div = document.createElement('div');
@@ -1672,14 +1669,14 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
           }
           break;
         default:
-          alert("json config error, not supported operator:" + fieldOperator);
+          notifyError("json config error, not supported operator:" + fieldOperator);
           return;
       }
       // 执行正则表达式
       const re = new RegExp(item?.value?.regexp ?? "");
       const m = re.exec(fieldFilter.value);
       if (!m) {
-        alert("regexp execute error:" + (item?.value?.regexp ?? ""));
+        notifyError("regexp execute error:" + (item?.value?.regexp ?? ""));
         return;
       }
       const result = m?.groups?.[item?.value?.group_name ?? ""] ?? "";
@@ -1704,7 +1701,7 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
           sb.push('=');
           break;
         default:
-          alert("json config error, not supported target operator:" + targetOperator);
+          notifyError("json config error, not supported target operator:" + targetOperator);
           return;
       }
       sb.push(JSON.stringify(result));
@@ -1815,7 +1812,7 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
             sb.append('*')
             break;
           default:
-            alert('not support operator:' + v.operator);
+            notifyError('not support operator:' + v.operator);
             break;
         }
         sb.append(' ');
@@ -2122,63 +2119,50 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
     setTestResult('Testing LogsQL...');
     setTestError('');
 
-    const body = {
-      queries: [
+    queryDatasource(
+      datasourceUid,
+      [
         {
           datasource: { type: 'victoriametrics-logs-datasource', uid: datasourceUid },
           expr: query,
           queryType: 'hits',
+          refId: 'A',
           maxLines: 100,
           step: '1d',
         },
       ],
-      from: String(startTs), // 单位确实是毫秒
-      to: String(endTs),
-    };
-
-    getBackendSrv()
-      .post(`/api/ds/query?ds_type=victoriametrics-logs-datasource&requestId=logsql_test`, body)
+      startTs, // 单位确实是毫秒
+      endTs,
+      { requestId: 'logsql_test' }
+    )
       .then((resp) => {
-        const status = resp?.results?.A?.status ?? 200;
-        switch (status) {
-          case 200:
-            {
-              // 显示 hits 结果的第一条记录的时间和值
-              const frames = resp?.results?.A?.frames;
-              let formatted = '';
-              if (Array.isArray(frames) && frames.length > 0) {
-                const values = frames[0]?.data?.values;
-                if (
-                  Array.isArray(values) &&
-                  Array.isArray(values[0]) &&
-                  Array.isArray(values[1]) &&
-                  values[0].length > 0 &&
-                  values[1].length > 0
-                ) {
-                  const ts = Number(values[0][0]);
-                  const val = values[1][0];
-                  const pad = (n: number) => String(n).padStart(2, '0');
-                  if (Number.isFinite(ts)) {
-                    const d = new Date(ts);
-                    formatted = ` * ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
-                      d.getHours()
-                    )}:${pad(d.getMinutes())}:${pad(d.getSeconds())} hits=${String(val)}`;
-                  }
-                }
-              }
-              setTestResult('LogsQL test success:' + formatted);
-              setTestError('');
-            }
-            break;
-          default:
-            setTestResult(String(status));
-            setTestError(resp?.results?.A?.error ?? '');
-            break;
+        if (resp.error) {
+          setTestResult('error');
+          setTestError(resp.error);
+          return;
         }
+        // 显示 hits 结果的第一条记录的时间和值
+        let formatted = '';
+        const fields = resp.frames[0]?.fields;
+        const times = fields?.[0]?.values;
+        const vals = fields?.[1]?.values;
+        if (times && vals && times.length > 0 && vals.length > 0) {
+          const ts = Number(times[0]);
+          const val = vals[0];
+          const pad = (n: number) => String(n).padStart(2, '0');
+          if (Number.isFinite(ts)) {
+            const d = new Date(ts);
+            formatted = ` * ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+              d.getHours()
+            )}:${pad(d.getMinutes())}:${pad(d.getSeconds())} hits=${String(val)}`;
+          }
+        }
+        setTestResult('LogsQL test success:' + formatted);
+        setTestError('');
       })
       .catch((err: any) => {
-        setTestResult(err?.statusText ?? '');
-        setTestError(err?.data?.results?.A?.error ?? '');
+        setTestResult(err?.statusText ?? err?.message ?? '');
+        setTestError(err?.data?.message ?? '');
       });
   };
 
@@ -2347,7 +2331,7 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
         }
         break;
       default:
-        alert('not support operator:' + operator);
+        notifyError('not support operator:' + operator);
         break;
     }
     loadFieldNamesByStreamFields();
@@ -2402,7 +2386,7 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
               sb.append(':!~');
               break;
             default:
-              alert('bad operator:' + filter.operator);
+              notifyError('bad operator:' + filter.operator);
               break;
           }
           sb.append(JSON.stringify(filter.value));
@@ -2479,7 +2463,7 @@ const LogFilterPanel: React.FC<PanelProps<LogFilterOptions>> = (props) => {
     }
     tbody.innerHTML = '';
     if (!Array.isArray(resp?.values)) {
-      alert('not an array');
+      notifyError('not an array');
       return;
     }
     if (resp.values.length === 0) {
