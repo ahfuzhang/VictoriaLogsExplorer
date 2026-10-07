@@ -1,4 +1,4 @@
-# Builds, signs and publishes the plugin when a version tag (e.g. v1.0.0) is pushed.
+# Builds and publishes the plugin (unsigned: Grafana signs it after the catalog review) when a version tag (e.g. v1.0.0) is pushed.
 # The plugin lives in a subdirectory, which grafana/plugin-actions/build-plugin does not support,
 # so the same steps are spelled out here.
 name: Release
@@ -18,8 +18,6 @@ jobs:
     defaults:
       run:
         working-directory: victoriametrics-victorialogsexplorer-panel
-    env:
-      GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -37,10 +35,6 @@ jobs:
 
       - name: Build frontend
         run: npm run build
-
-      - name: Sign plugin
-        # Generate an access policy token: https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token
-        run: npm run sign
 
       - name: Check package version matches tag
         env:
