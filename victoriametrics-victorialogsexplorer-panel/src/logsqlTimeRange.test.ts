@@ -1,0 +1,69 @@
+import { dateTimeParse, type TimeRange } from '@grafana/data';
+import { formatLogsqlTimeRange } from './logsqlTimeRange';
+
+const createRange = (
+  from = '2026-09-15T16:00:00.000Z',
+  to = '2026-09-16T15:59:59.000Z'
+): TimeRange => ({
+  from: dateTimeParse(Date.parse(from), { timeZone: 'utc' }),
+  to: dateTimeParse(Date.parse(to), { timeZone: 'utc' }),
+  raw: { from, to },
+});
+
+describe('formatLogsqlTimeRange', () => {
+  it('formats UTC strings from shared links in the dashboard timezone without changing the instants', () => {
+    const range = createRange();
+    const formatted = formatLogsqlTimeRange(range, 'Asia/Shanghai');
+
+    expect(formatted).toBe('_time:[2026-09-16T00:00:00.000+08:00, 2026-09-16T23:59:59.000+08:00]');
+    const [from, to] = formatted.slice('_time:['.length, -1).split(', ');
+    expect(Date.parse(from)).toBe(range.from.valueOf());
+    expect(Date.parse(to)).toBe(range.to.valueOf());
+    expect(range.from.toISOString()).toBe('2026-09-15T16:00:00.000Z');
+  });
+
+  it('formats DateTime values from the absolute time picker and preserves milliseconds', () => {
+    const range = createRange('2026-09-15T16:00:00.123Z', '2026-09-16T15:59:59.987Z');
+    range.raw = { from: range.from, to: range.to };
+
+    expect(formatLogsqlTimeRange(range, 'Asia/Shanghai')).toBe(
+      '_time:[2026-09-16T00:00:00.123+08:00, 2026-09-16T23:59:59.987+08:00]'
+    );
+  });
+
+  it('normalizes absolute strings that already contain another timezone offset', () => {
+    const range = createRange('2026-09-16T00:00:00.000+08:00', '2026-09-16T23:59:59.000+08:00');
+
+    expect(formatLogsqlTimeRange(range, 'Asia/Kolkata')).toBe(
+      '_time:[2026-09-15T21:30:00.000+05:30, 2026-09-16T21:29:59.000+05:30]'
+    );
+  });
+
+  it.each(['utc', 'browser'])('includes an explicit offset for %s (test browser uses UTC)', (timeZone) => {
+    expect(formatLogsqlTimeRange(createRange(), timeZone)).toBe(
+      '_time:[2026-09-15T16:00:00.000+00:00, 2026-09-16T15:59:59.000+00:00]'
+    );
+  });
+
+  it('uses the correct offset for each endpoint across a daylight saving transition', () => {
+    const range = createRange('2026-11-01T05:30:00.000Z', '2026-11-01T06:30:00.000Z');
+
+    expect(formatLogsqlTimeRange(range, 'America/New_York')).toBe(
+      '_time:[2026-11-01T01:30:00.000-04:00, 2026-11-01T01:30:00.000-05:00]'
+    );
+  });
+
+  it.each(['now-15m', 'now/d', 'now/d+8h'])('preserves the existing relative range %s to now', (from) => {
+    const range = createRange();
+    range.raw = { from, to: 'now' };
+
+    expect(formatLogsqlTimeRange(range, 'Asia/Shanghai')).toBe(`_time:[${from}, now]`);
+  });
+
+  it('formats the absolute endpoint of a mixed absolute and relative range', () => {
+    const range = createRange();
+    range.raw.to = 'now';
+
+    expect(formatLogsqlTimeRange(range, 'Asia/Shanghai')).toBe('_time:[2026-09-16T00:00:00.000+08:00, now]');
+  });
+});

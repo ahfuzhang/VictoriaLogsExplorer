@@ -5,4 +5,5 @@
 /dist/
 .DS_Store
 .env
-victoriametrics-victorialogsexplorer-panel/
+/victoriametrics-victorialogsexplorer-panel/.git/
+

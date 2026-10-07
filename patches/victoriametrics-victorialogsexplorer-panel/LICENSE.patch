@@ -1,0 +1,13 @@
+diff --git a/LICENSE b/LICENSE
+index 9c8f3ea..c91455a 100644
+--- a/LICENSE
++++ b/LICENSE
+@@ -186,7 +186,7 @@
+       same "printed page" as the copyright notice for easier
+       identification within third-party archives.
+ 
+-   Copyright {yyyy} {name of copyright owner}
++   Copyright 2026 ahfuzhang
+ 
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.

@@ -1,0 +1,11 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 9d63e78..f8003a3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,5 +1,5 @@
+ # Changelog
+ 
+-## 1.0.0 (Unreleased)
++## 1.0.0 (2026-10-07)
+ 
+ Initial release.

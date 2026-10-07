@@ -1,0 +1,44 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "panel",
+  "name": "VictoriaLogsExplorer",
+  "id": "ahfuzhang-victorialogsexplorer-panel",
+  "info": {
+    "keywords": ["panel", "victorialogs", "logs", "log explorer"],
+    "description": "An all-in-one Grafana panel for exploring logs stored in VictoriaLogs.",
+    "author": {
+      "name": "ahfuzhang",
+      "url": "https://github.com/ahfuzhang"
+    },
+    "logos": {
+      "small": "img/logo.svg",
+      "large": "img/logo.svg"
+    },
+    "links": [
+      {
+        "name": "Website",
+        "url": "https://github.com/ahfuzhang/VictoriaLogsExplorer"
+      },
+      {
+        "name": "License",
+        "url": "https://github.com/ahfuzhang/VictoriaLogsExplorer/blob/main/victoriametrics-victorialogsexplorer-panel/LICENSE"
+      },
+      {
+        "name": "Issues",
+        "url": "https://github.com/ahfuzhang/VictoriaLogsExplorer/issues"
+      }
+    ],
+    "screenshots": [
+      {
+        "name": "All-in-one log explorer",
+        "path": "img/all-in-one-log-explorer.png"
+      }
+    ],
+    "version": "%VERSION%",
+    "updated": "%TODAY%"
+  },
+  "dependencies": {
+    "grafanaDependency": ">=11.6.0",
+    "plugins": []
+  }
+}

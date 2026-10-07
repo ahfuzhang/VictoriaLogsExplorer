@@ -1,0 +1,24 @@
+diff --git a/.config/webpack/webpack.config.ts b/.config/webpack/webpack.config.ts
+index 6c21306..dded2ff 100644
+--- a/.config/webpack/webpack.config.ts
++++ b/.config/webpack/webpack.config.ts
+@@ -6,7 +6,6 @@
+  */
+ 
+ import CopyWebpackPlugin from 'copy-webpack-plugin';
+-import ESLintPlugin from 'eslint-webpack-plugin';
+ import ForkTsCheckerWebpackPlugin from 'fork-ts-checker-webpack-plugin';
+ import path from 'path';
+ import ReplaceInFileWebpackPlugin from 'replace-in-file-webpack-plugin';
+@@ -203,11 +202,6 @@ const config = async (env: Env): Promise<Configuration> => {
+           },
+           typescript: { configFile: path.join(process.cwd(), 'tsconfig.json') },
+         }),
+-        new ESLintPlugin({
+-          extensions: ['.ts', '.tsx'],
+-          lintDirtyModulesOnly: Boolean(env.development), // don't lint on start, only lint changed files
+-          failOnError: Boolean(env.production),
+-        }),
+       ] : []),
+     ],
+ 
